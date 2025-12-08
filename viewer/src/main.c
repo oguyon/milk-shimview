@@ -9,6 +9,7 @@ typedef struct {
     IMAGE *image;
     GtkWidget *picture;
     GtkWidget *colorbar;
+    GtkWidget *selection_area;
     char *image_name;
     guint timeout_id;
 
@@ -24,6 +25,15 @@ typedef struct {
 
     // Control flags
     gboolean force_redraw;
+
+    // Selection state
+    gboolean selection_active;
+    gboolean is_dragging;
+    double start_x, start_y; // Widget coords
+    double curr_x, curr_y;   // Widget coords
+
+    // Selected region in image coordinates (pixels)
+    int sel_x1, sel_y1, sel_x2, sel_y2;
 
     // UI Widgets
     GtkWidget *spin_min;
@@ -114,6 +124,15 @@ on_btn_autoscale_clicked (GtkButton *btn, gpointer user_data)
     app->force_redraw = TRUE;
 }
 
+static void
+on_btn_reset_selection_clicked (GtkButton *btn, gpointer user_data)
+{
+    ViewerApp *app = (ViewerApp *)user_data;
+    app->selection_active = FALSE;
+    app->force_redraw = TRUE;
+    gtk_widget_queue_draw(app->selection_area);
+}
+
 // Drawing function for colorbar
 static void
 draw_colorbar_func (GtkDrawingArea *area,
@@ -141,13 +160,11 @@ draw_colorbar_func (GtkDrawingArea *area,
     cairo_fill (cr);
     cairo_pattern_destroy (pat);
 
-    // Draw Border
     cairo_set_source_rgb(cr, 0, 0, 0);
     cairo_set_line_width(cr, 1);
     cairo_rectangle (cr, bar_x, margin_top, bar_width, bar_height);
     cairo_stroke(cr);
 
-    // Draw Labels
     cairo_set_source_rgb(cr, 0, 0, 0);
     cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_NORMAL);
     cairo_set_font_size(cr, 12);
@@ -155,17 +172,169 @@ draw_colorbar_func (GtkDrawingArea *area,
     char buf[64];
     cairo_text_extents_t extents;
 
-    // Max Value (Top)
     snprintf(buf, sizeof(buf), "%.2g", app->current_max);
     cairo_text_extents(cr, buf, &extents);
     cairo_move_to(cr, (width - extents.width)/2, margin_top - 5);
     cairo_show_text(cr, buf);
 
-    // Min Value (Bottom)
     snprintf(buf, sizeof(buf), "%.2g", app->current_min);
     cairo_text_extents(cr, buf, &extents);
     cairo_move_to(cr, (width - extents.width)/2, height - margin_bottom + extents.height + 5);
     cairo_show_text(cr, buf);
+}
+
+// Helpers for coordinate conversion
+static void
+get_image_screen_geometry(ViewerApp *app, double *offset_x, double *offset_y, double *scale) {
+    if (!app->image) {
+        *offset_x = 0; *offset_y = 0; *scale = 1.0;
+        return;
+    }
+
+    int widget_w = gtk_widget_get_width(app->picture);
+    int widget_h = gtk_widget_get_height(app->picture);
+
+    if (widget_w <= 0 || widget_h <= 0) {
+        *offset_x = 0; *offset_y = 0; *scale = 1.0;
+        return;
+    }
+
+    double img_w = (double)app->image->md->size[0];
+    double img_h = (double)app->image->md->size[1];
+
+    if (img_w <= 0 || img_h <= 0) {
+        *offset_x = 0; *offset_y = 0; *scale = 1.0;
+        return;
+    }
+
+    double scale_x = (double)widget_w / img_w;
+    double scale_y = (double)widget_h / img_h;
+
+    *scale = (scale_x < scale_y) ? scale_x : scale_y;
+
+    double display_w = img_w * (*scale);
+    double display_h = img_h * (*scale);
+
+    *offset_x = (widget_w - display_w) / 2.0;
+    *offset_y = (widget_h - display_h) / 2.0;
+}
+
+static void
+widget_to_image_coords(ViewerApp *app, double wx, double wy, int *ix, int *iy) {
+    double offset_x, offset_y, scale;
+    get_image_screen_geometry(app, &offset_x, &offset_y, &scale);
+
+    double lx = (wx - offset_x) / scale;
+    double ly = (wy - offset_y) / scale;
+
+    if (lx < 0) lx = 0;
+    if (ly < 0) ly = 0;
+    if (lx >= app->image->md->size[0]) lx = app->image->md->size[0] - 1;
+    if (ly >= app->image->md->size[1]) ly = app->image->md->size[1] - 1;
+
+    *ix = (int)lx;
+    *iy = (int)ly;
+}
+
+// Drawing function for selection overlay
+static void
+draw_selection_func (GtkDrawingArea *area,
+                     cairo_t        *cr,
+                     int             width,
+                     int             height,
+                     gpointer        user_data)
+{
+    ViewerApp *app = (ViewerApp *)user_data;
+
+    if (!app->is_dragging && !app->selection_active) return;
+
+    double x1, y1, x2, y2;
+
+    if (app->is_dragging) {
+        x1 = app->start_x;
+        y1 = app->start_y;
+        x2 = app->curr_x;
+        y2 = app->curr_y;
+    } else {
+        // Convert image coords back to widget coords for display
+        double offset_x, offset_y, scale;
+        get_image_screen_geometry(app, &offset_x, &offset_y, &scale);
+        x1 = app->sel_x1 * scale + offset_x;
+        y1 = app->sel_y1 * scale + offset_y;
+        x2 = app->sel_x2 * scale + offset_x;
+        y2 = app->sel_y2 * scale + offset_y;
+        // Adjust for inclusive pixel range if desired, but simple mapping is usually fine visually
+        x2 += scale; // Make it cover the pixel
+        y2 += scale;
+    }
+
+    cairo_set_source_rgba(cr, 1, 0, 0, 0.3); // Red transparent fill
+    cairo_rectangle(cr, x1, y1, x2 - x1, y2 - y1);
+    cairo_fill(cr);
+
+    cairo_set_source_rgb(cr, 1, 0, 0); // Red outline
+    cairo_set_line_width(cr, 2);
+    cairo_rectangle(cr, x1, y1, x2 - x1, y2 - y1);
+    cairo_stroke(cr);
+}
+
+// Gesture callbacks
+static void
+drag_begin (GtkGestureDrag *gesture,
+            double          x,
+            double          y,
+            gpointer        user_data)
+{
+    ViewerApp *app = (ViewerApp *)user_data;
+    app->is_dragging = TRUE;
+    app->start_x = x;
+    app->start_y = y;
+    app->curr_x = x;
+    app->curr_y = y;
+    gtk_widget_queue_draw(app->selection_area);
+}
+
+static void
+drag_update (GtkGestureDrag *gesture,
+             double          offset_x,
+             double          offset_y,
+             gpointer        user_data)
+{
+    ViewerApp *app = (ViewerApp *)user_data;
+    app->curr_x = app->start_x + offset_x;
+    app->curr_y = app->start_y + offset_y;
+    gtk_widget_queue_draw(app->selection_area);
+}
+
+static void
+drag_end (GtkGestureDrag *gesture,
+          double          offset_x,
+          double          offset_y,
+          gpointer        user_data)
+{
+    ViewerApp *app = (ViewerApp *)user_data;
+    app->is_dragging = FALSE;
+    app->curr_x = app->start_x + offset_x;
+    app->curr_y = app->start_y + offset_y;
+
+    // If drag is very small, maybe treat as clear?
+    if (fabs(offset_x) < 2 && fabs(offset_y) < 2) {
+        app->selection_active = FALSE;
+    } else {
+        app->selection_active = TRUE;
+
+        int ix1, iy1, ix2, iy2;
+        widget_to_image_coords(app, app->start_x, app->start_y, &ix1, &iy1);
+        widget_to_image_coords(app, app->curr_x, app->curr_y, &ix2, &iy2);
+
+        app->sel_x1 = (ix1 < ix2) ? ix1 : ix2;
+        app->sel_x2 = (ix1 < ix2) ? ix2 : ix1;
+        app->sel_y1 = (iy1 < iy2) ? iy1 : iy2;
+        app->sel_y2 = (iy1 < iy2) ? iy2 : iy1;
+    }
+
+    app->force_redraw = TRUE;
+    gtk_widget_queue_draw(app->selection_area);
 }
 
 static void
@@ -203,26 +372,50 @@ draw_image (ViewerApp *app)
     gboolean need_scan = (!app->fixed_min || !app->fixed_max);
 
     if (need_scan) {
-        for (int i = 0; i < width * height; i++) {
-            double val = 0;
-            if (datatype == _DATATYPE_FLOAT) {
-                val = ((float*)raw_data)[i];
-            } else if (datatype == _DATATYPE_DOUBLE) {
-                val = ((double*)raw_data)[i];
-            } else if (datatype == _DATATYPE_UINT8) {
-                val = ((uint8_t*)raw_data)[i];
-            } else if (datatype == _DATATYPE_INT16) {
-                 val = ((int16_t*)raw_data)[i];
-            } else if (datatype == _DATATYPE_UINT16) {
-                 val = ((uint16_t*)raw_data)[i];
-            } else if (datatype == _DATATYPE_INT32) {
-                 val = ((int32_t*)raw_data)[i];
-            } else if (datatype == _DATATYPE_UINT32) {
-                 val = ((uint32_t*)raw_data)[i];
-            }
+        int x_start = 0, y_start = 0;
+        int x_end = width, y_end = height;
 
-            if (val < min_val) min_val = val;
-            if (val > max_val) max_val = val;
+        if (app->selection_active) {
+            x_start = app->sel_x1;
+            x_end = app->sel_x2 + 1;
+            y_start = app->sel_y1;
+            y_end = app->sel_y2 + 1;
+            // Clamp
+            if (x_start < 0) x_start = 0;
+            if (y_start < 0) y_start = 0;
+            if (x_end > width) x_end = width;
+            if (y_end > height) y_end = height;
+        }
+
+        for (int y = y_start; y < y_end; y++) {
+            for (int x = x_start; x < x_end; x++) {
+                int i = y * width + x;
+                double val = 0;
+                if (datatype == _DATATYPE_FLOAT) {
+                    val = ((float*)raw_data)[i];
+                } else if (datatype == _DATATYPE_DOUBLE) {
+                    val = ((double*)raw_data)[i];
+                } else if (datatype == _DATATYPE_UINT8) {
+                    val = ((uint8_t*)raw_data)[i];
+                } else if (datatype == _DATATYPE_INT16) {
+                     val = ((int16_t*)raw_data)[i];
+                } else if (datatype == _DATATYPE_UINT16) {
+                     val = ((uint16_t*)raw_data)[i];
+                } else if (datatype == _DATATYPE_INT32) {
+                     val = ((int32_t*)raw_data)[i];
+                } else if (datatype == _DATATYPE_UINT32) {
+                     val = ((uint32_t*)raw_data)[i];
+                }
+
+                if (val < min_val) min_val = val;
+                if (val > max_val) max_val = val;
+            }
+        }
+
+        // Handle case where selection might be empty or invalid values found
+        if (min_val > max_val) {
+            min_val = 0;
+            max_val = 1;
         }
     }
 
@@ -231,16 +424,13 @@ draw_image (ViewerApp *app)
 
     if (max_val == min_val) max_val = min_val + 1.0;
 
-    // Update current scaling values for colorbar
     app->current_min = min_val;
     app->current_max = max_val;
 
-    // Trigger colorbar redraw
     if (app->colorbar) {
         gtk_widget_queue_draw(app->colorbar);
     }
 
-    // Update spin buttons if in auto mode so user sees the range
     if (!app->fixed_min && app->spin_min) {
         gtk_spin_button_set_value(GTK_SPIN_BUTTON(app->spin_min), min_val);
     }
@@ -328,8 +518,11 @@ activate (GtkApplication *app,
     GtkWidget *hbox;
     GtkWidget *vbox_controls;
     GtkWidget *scrolled_window;
+    GtkWidget *overlay;
     GtkWidget *label;
     GtkWidget *btn_autoscale;
+    GtkWidget *btn_reset;
+    GtkGesture *drag_controller;
 
     window = gtk_application_window_new (app);
     gtk_window_set_title (GTK_WINDOW (window), "ImageStreamIO Viewer");
@@ -380,16 +573,40 @@ activate (GtkApplication *app,
     g_signal_connect (btn_autoscale, "clicked", G_CALLBACK (on_btn_autoscale_clicked), viewer);
     gtk_box_append (GTK_BOX (vbox_controls), btn_autoscale);
 
+    // Reset Selection Button
+    btn_reset = gtk_button_new_with_label ("Reset Selection");
+    g_signal_connect (btn_reset, "clicked", G_CALLBACK (on_btn_reset_selection_clicked), viewer);
+    gtk_box_append (GTK_BOX (vbox_controls), btn_reset);
 
-    // Image Display
+
+    // Image Display Area with Overlay
     scrolled_window = gtk_scrolled_window_new ();
     gtk_widget_set_vexpand (scrolled_window, TRUE);
     gtk_widget_set_hexpand (scrolled_window, TRUE);
     gtk_box_append (GTK_BOX (hbox), scrolled_window);
 
+    overlay = gtk_overlay_new();
+    gtk_scrolled_window_set_child (GTK_SCROLLED_WINDOW (scrolled_window), overlay);
+
     viewer->picture = gtk_picture_new ();
     gtk_picture_set_content_fit (GTK_PICTURE (viewer->picture), GTK_CONTENT_FIT_CONTAIN);
-    gtk_scrolled_window_set_child (GTK_SCROLLED_WINDOW (scrolled_window), viewer->picture);
+    // Add Picture as child
+    gtk_overlay_set_child(GTK_OVERLAY(overlay), viewer->picture);
+
+    // Selection Overlay (Drawing Area)
+    viewer->selection_area = gtk_drawing_area_new();
+    gtk_widget_set_hexpand(viewer->selection_area, TRUE);
+    gtk_widget_set_vexpand(viewer->selection_area, TRUE);
+    gtk_drawing_area_set_draw_func(GTK_DRAWING_AREA(viewer->selection_area), draw_selection_func, viewer, NULL);
+    gtk_overlay_add_overlay(GTK_OVERLAY(overlay), viewer->selection_area);
+
+    // Gestures for dragging selection
+    drag_controller = gtk_gesture_drag_new();
+    g_signal_connect(drag_controller, "drag-begin", G_CALLBACK(drag_begin), viewer);
+    g_signal_connect(drag_controller, "drag-update", G_CALLBACK(drag_update), viewer);
+    g_signal_connect(drag_controller, "drag-end", G_CALLBACK(drag_end), viewer);
+    gtk_widget_add_controller(viewer->selection_area, GTK_EVENT_CONTROLLER(drag_controller));
+
 
     // Colorbar
     viewer->colorbar = gtk_drawing_area_new ();
