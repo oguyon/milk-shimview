@@ -8,10 +8,49 @@
 typedef struct {
     IMAGE *image;
     GtkWidget *picture;
-    GdkMemoryTexture *texture;
     char *image_name;
     guint timeout_id;
+    double min_val;
+    double max_val;
+    gboolean fixed_min;
+    gboolean fixed_max;
 } ViewerApp;
+
+// Command line option variables
+static double opt_min = 0;
+static double opt_max = 0;
+static gboolean has_min = FALSE;
+static gboolean has_max = FALSE;
+
+// Custom callback to flag if options were set
+static gboolean
+parse_min_cb (const gchar *option_name,
+              const gchar *value,
+              gpointer     data,
+              GError     **error)
+{
+    opt_min = g_ascii_strtod (value, NULL);
+    has_min = TRUE;
+    return TRUE;
+}
+
+static gboolean
+parse_max_cb (const gchar *option_name,
+              const gchar *value,
+              gpointer     data,
+              GError     **error)
+{
+    opt_max = g_ascii_strtod (value, NULL);
+    has_max = TRUE;
+    return TRUE;
+}
+
+static GOptionEntry entries[] =
+{
+  { "min", 'm', G_OPTION_FLAG_NONE, G_OPTION_ARG_CALLBACK, parse_min_cb, "Minimum value for scaling", "VAL" },
+  { "max", 'M', G_OPTION_FLAG_NONE, G_OPTION_ARG_CALLBACK, parse_max_cb, "Maximum value for scaling", "VAL" },
+  { NULL }
+};
 
 static void
 draw_image (ViewerApp *app)
@@ -20,21 +59,13 @@ draw_image (ViewerApp *app)
 
     void *raw_data = NULL;
 
-    // Check if ImageStreamIO_readLastWroteBuffer is available in the library version
-    // If not (e.g. older version installed or not exported), we implement a fallback.
-    // Based on linker error, it seems it is not exported or available.
-    // So we use inline implementation logic:
-
+    // Fallback logic for reading buffer
     if (app->image->md->imagetype & CIRCULAR_BUFFER) {
-        // It's a circular buffer, we need to find the last written slice.
-        // cnt1 holds the index of the last written slice.
-        // However, if it's 3D, we need to point to that slice.
         if (app->image->md->naxis == 3) {
-            uint64_t slice_index = app->image->md->cnt1;
-            // Safety check against size
-            if (slice_index >= app->image->md->size[2]) {
-                slice_index = 0; // Should not happen if cnt1 is maintained correctly
-            }
+            // cnt1 is the last slice written.
+            // We use modulo just in case it is a monotonic counter,
+            // though usually it should be the index itself.
+            uint64_t slice_index = app->image->md->cnt1 % app->image->md->size[2];
 
             size_t element_size = ImageStreamIO_typesize(app->image->md->datatype);
             size_t frame_size = app->image->md->size[0] * app->image->md->size[1] * element_size;
@@ -56,32 +87,38 @@ draw_image (ViewerApp *app)
     int stride = width * 4;
     guchar *pixels = g_malloc (stride * height);
 
-    // Simplistic min/max auto-scaling
     double min_val = 1e30;
     double max_val = -1e30;
 
-    // Scan for min/max
-    for (int i = 0; i < width * height; i++) {
-        double val = 0;
-        if (datatype == _DATATYPE_FLOAT) {
-            val = ((float*)raw_data)[i];
-        } else if (datatype == _DATATYPE_DOUBLE) {
-            val = ((double*)raw_data)[i];
-        } else if (datatype == _DATATYPE_UINT8) {
-            val = ((uint8_t*)raw_data)[i];
-        } else if (datatype == _DATATYPE_INT16) {
-             val = ((int16_t*)raw_data)[i];
-        } else if (datatype == _DATATYPE_UINT16) {
-             val = ((uint16_t*)raw_data)[i];
-        } else if (datatype == _DATATYPE_INT32) {
-             val = ((int32_t*)raw_data)[i];
-        } else if (datatype == _DATATYPE_UINT32) {
-             val = ((uint32_t*)raw_data)[i];
-        }
+    // Optimization: if fixed_min and fixed_max are true, skip scan.
+    gboolean need_scan = (!app->fixed_min || !app->fixed_max);
 
-        if (val < min_val) min_val = val;
-        if (val > max_val) max_val = val;
+    if (need_scan) {
+        for (int i = 0; i < width * height; i++) {
+            double val = 0;
+            if (datatype == _DATATYPE_FLOAT) {
+                val = ((float*)raw_data)[i];
+            } else if (datatype == _DATATYPE_DOUBLE) {
+                val = ((double*)raw_data)[i];
+            } else if (datatype == _DATATYPE_UINT8) {
+                val = ((uint8_t*)raw_data)[i];
+            } else if (datatype == _DATATYPE_INT16) {
+                 val = ((int16_t*)raw_data)[i];
+            } else if (datatype == _DATATYPE_UINT16) {
+                 val = ((uint16_t*)raw_data)[i];
+            } else if (datatype == _DATATYPE_INT32) {
+                 val = ((int32_t*)raw_data)[i];
+            } else if (datatype == _DATATYPE_UINT32) {
+                 val = ((uint32_t*)raw_data)[i];
+            }
+
+            if (val < min_val) min_val = val;
+            if (val > max_val) max_val = val;
+        }
     }
+
+    if (app->fixed_min) min_val = app->min_val;
+    if (app->fixed_max) max_val = app->max_val;
 
     if (max_val == min_val) max_val = min_val + 1.0;
 
@@ -105,6 +142,10 @@ draw_image (ViewerApp *app)
                 val = ((uint32_t*)raw_data)[idx];
             }
 
+            // Clip values
+            if (val < min_val) val = min_val;
+            if (val > max_val) val = max_val;
+
             uint8_t pixel_val = (uint8_t)((val - min_val) / (max_val - min_val) * 255.0);
 
             // RGBA
@@ -117,7 +158,6 @@ draw_image (ViewerApp *app)
     }
 
     GBytes *bytes = g_bytes_new_take (pixels, stride * height);
-    // Use valid GdkMemoryFormat
     GdkTexture *texture = gdk_memory_texture_new (width, height, GDK_MEMORY_R8G8B8A8, bytes, stride);
     g_bytes_unref (bytes);
 
@@ -136,7 +176,6 @@ update_display (gpointer user_data)
         if (ImageStreamIO_openIm(app->image, app->image_name) != IMAGESTREAMIO_SUCCESS) {
              free(app->image);
              app->image = NULL;
-             // Try again later
              return G_SOURCE_CONTINUE;
         }
         printf("Connected to stream: %s\n", app->image_name);
@@ -146,11 +185,7 @@ update_display (gpointer user_data)
     // Check update counter
     static uint64_t last_cnt0 = 0;
 
-    // Basic polling synchronization: only update if counter changed
-    // In a real high-performance app we might use semaphores in a thread
     if (app->image->md->cnt0 != last_cnt0) {
-        // Simple spinlock-ish wait if writing (optional, might block UI)
-        // For UI responsiveness we skip this frame if writing
         if (app->image->md->write) {
              return G_SOURCE_CONTINUE;
         }
@@ -186,7 +221,7 @@ activate (GtkApplication *app,
     gtk_picture_set_content_fit (GTK_PICTURE (viewer->picture), GTK_CONTENT_FIT_CONTAIN);
     gtk_scrolled_window_set_child (GTK_SCROLLED_WINDOW (scrolled_window), viewer->picture);
 
-    viewer->timeout_id = g_timeout_add (30, update_display, viewer); // 30ms polling
+    viewer->timeout_id = g_timeout_add (30, update_display, viewer);
 
     gtk_window_present (GTK_WINDOW (window));
 }
@@ -198,14 +233,33 @@ main (int    argc,
     GtkApplication *app;
     int status;
     ViewerApp viewer = {0};
+    GError *error = NULL;
+    GOptionContext *context;
+
+    // Parse command line arguments
+    context = g_option_context_new ("<stream_name> - ImageStreamIO Viewer");
+    g_option_context_add_main_entries (context, entries, NULL);
+    if (!g_option_context_parse (context, &argc, &argv, &error)) {
+        g_print ("option parsing failed: %s\n", error->message);
+        exit (1);
+    }
+    g_option_context_free (context);
 
     if (argc < 2) {
-        printf("Usage: %s <stream_name>\n", argv[0]);
+        printf("Usage: %s [options] <stream_name>\n", argv[0]);
         return 1;
     }
-    viewer.image_name = argv[1];
 
-    app = gtk_application_new ("org.milk.shmimview", G_APPLICATION_DEFAULT_FLAGS);
+    viewer.image_name = argv[1];
+    viewer.min_val = opt_min;
+    viewer.max_val = opt_max;
+    viewer.fixed_min = has_min;
+    viewer.fixed_max = has_max;
+
+    if (viewer.fixed_min) printf("Fixed min: %f\n", viewer.min_val);
+    if (viewer.fixed_max) printf("Fixed max: %f\n", viewer.max_val);
+
+    app = gtk_application_new ("org.milk.shmimview", G_APPLICATION_NON_UNIQUE);
     g_signal_connect (app, "activate", G_CALLBACK (activate), &viewer);
     status = g_application_run (G_APPLICATION (app), 0, NULL);
     g_object_unref (app);
