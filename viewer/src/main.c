@@ -7,11 +7,17 @@
 // Application state
 typedef struct {
     IMAGE *image;
-    GtkWidget *picture;
+    GtkWidget *image_area; // Replaces picture
     GtkWidget *colorbar;
     GtkWidget *selection_area;
     char *image_name;
     guint timeout_id;
+
+    // Image Data Buffer for Cairo
+    guchar *display_buffer;
+    size_t display_buffer_size;
+    int img_width;
+    int img_height;
 
     // Scaling state
     double min_val;
@@ -134,8 +140,6 @@ static void
 on_spin_min_changed (GtkSpinButton *spin, gpointer user_data)
 {
     ViewerApp *app = (ViewerApp *)user_data;
-    // Only update if not currently being updated by code to avoid feedback loops if needed,
-    // but here we just accept value.
     app->min_val = gtk_spin_button_get_value(spin);
     app->force_redraw = TRUE;
 }
@@ -170,6 +174,16 @@ on_btn_autoscale_clicked (GtkButton *btn, gpointer user_data)
 }
 
 static void
+on_btn_reset_colorbar_clicked (GtkButton *btn, gpointer user_data)
+{
+    ViewerApp *app = (ViewerApp *)user_data;
+    // Force Auto On
+    gtk_check_button_set_active(GTK_CHECK_BUTTON(app->check_min_auto), TRUE);
+    gtk_check_button_set_active(GTK_CHECK_BUTTON(app->check_max_auto), TRUE);
+    app->force_redraw = TRUE;
+}
+
+static void
 on_btn_reset_selection_clicked (GtkButton *btn, gpointer user_data)
 {
     ViewerApp *app = (ViewerApp *)user_data;
@@ -186,7 +200,6 @@ on_fit_window_toggled (GtkCheckButton *btn, gpointer user_data)
     app->fit_window = gtk_check_button_get_active(btn);
 
     if (!app->fit_window) {
-        // Switching to fixed zoom. Initialize zoom_factor to current actual scale
         double off_x, off_y, scale;
         get_image_screen_geometry(app, &off_x, &off_y, &scale);
         if (scale > 0) app->zoom_factor = scale;
@@ -202,12 +215,10 @@ on_dropdown_zoom_changed (GtkDropDown *dropdown, GParamSpec *pspec, gpointer use
     ViewerApp *app = (ViewerApp *)user_data;
     guint selected = gtk_drop_down_get_selected(dropdown);
 
-    // Zoom levels: 1/8, 1/4, 1/2, 1, 2, 4, 8
     double zooms[] = {0.125, 0.25, 0.5, 1.0, 2.0, 4.0, 8.0};
     if (selected < 7) {
         app->zoom_factor = zooms[selected];
 
-        // Disable Fit Window if it was on
         if (app->fit_window) {
             g_signal_handlers_block_by_func(app->btn_fit_window, on_fit_window_toggled, app);
             gtk_check_button_set_active(GTK_CHECK_BUTTON(app->btn_fit_window), FALSE);
@@ -234,13 +245,10 @@ on_scroll (GtkEventControllerScroll *controller,
         app->zoom_factor *= zoom_step;
     }
 
-    // Disable Fit Window
     if (app->fit_window) {
-        // Initialize zoom factor first
         double off_x, off_y, scale;
         get_image_screen_geometry(app, &off_x, &off_y, &scale);
         app->zoom_factor = scale;
-        // Apply the scroll step
         if (dy > 0) app->zoom_factor /= zoom_step;
         else if (dy < 0) app->zoom_factor *= zoom_step;
 
@@ -251,7 +259,7 @@ on_scroll (GtkEventControllerScroll *controller,
     }
 
     update_zoom_layout(app);
-    return TRUE; // Handled
+    return TRUE;
 }
 
 // Helpers for coordinate conversion
@@ -262,8 +270,8 @@ get_image_screen_geometry(ViewerApp *app, double *offset_x, double *offset_y, do
         return;
     }
 
-    int widget_w = gtk_widget_get_width(app->picture);
-    int widget_h = gtk_widget_get_height(app->picture);
+    int widget_w = gtk_widget_get_width(app->image_area);
+    int widget_h = gtk_widget_get_height(app->image_area);
 
     if (widget_w <= 0 || widget_h <= 0) {
         *offset_x = 0; *offset_y = 0; *scale = 1.0;
@@ -306,7 +314,7 @@ get_image_screen_geometry(ViewerApp *app, double *offset_x, double *offset_y, do
     if (app->selection_area) {
         graphene_point_t p_in = {0, 0};
         graphene_point_t p_out;
-        if (gtk_widget_compute_point(app->picture, app->selection_area, &p_in, &p_out)) {
+        if (gtk_widget_compute_point(app->image_area, app->selection_area, &p_in, &p_out)) {
             *offset_x = int_off_x + p_out.x;
             *offset_y = int_off_y + p_out.y;
         } else {
@@ -329,14 +337,12 @@ update_zoom_layout(ViewerApp *app) {
     char buf[64];
 
     if (app->fit_window) {
-        // Fit Window Mode
-        gtk_picture_set_content_fit(GTK_PICTURE(app->picture), GTK_CONTENT_FIT_CONTAIN);
-        gtk_widget_set_size_request(app->picture, -1, -1);
-        gtk_widget_set_halign(app->picture, GTK_ALIGN_FILL);
-        gtk_widget_set_valign(app->picture, GTK_ALIGN_FILL);
+        gtk_widget_set_size_request(app->image_area, -1, -1);
+        gtk_widget_set_halign(app->image_area, GTK_ALIGN_FILL);
+        gtk_widget_set_valign(app->image_area, GTK_ALIGN_FILL);
 
-        gtk_widget_set_hexpand(app->picture, TRUE);
-        gtk_widget_set_vexpand(app->picture, TRUE);
+        gtk_widget_set_hexpand(app->image_area, TRUE);
+        gtk_widget_set_vexpand(app->image_area, TRUE);
 
         double off_x, off_y, scale;
         get_image_screen_geometry(app, &off_x, &off_y, &scale);
@@ -344,32 +350,30 @@ update_zoom_layout(ViewerApp *app) {
         gtk_label_set_text(GTK_LABEL(app->lbl_zoom), buf);
 
         gtk_widget_queue_draw(app->selection_area);
+        gtk_widget_queue_draw(app->image_area);
     } else {
-        // Fixed Zoom Mode
         int req_w = (int)(img_w * app->zoom_factor);
         int req_h = (int)(img_h * app->zoom_factor);
 
-        gtk_picture_set_content_fit(GTK_PICTURE(app->picture), GTK_CONTENT_FIT_CONTAIN);
-        gtk_widget_set_size_request(app->picture, req_w, req_h);
+        gtk_widget_set_size_request(app->image_area, req_w, req_h);
 
-        // Center if smaller than viewport
-        gtk_widget_set_halign(app->picture, GTK_ALIGN_CENTER);
-        gtk_widget_set_valign(app->picture, GTK_ALIGN_CENTER);
+        gtk_widget_set_halign(app->image_area, GTK_ALIGN_CENTER);
+        gtk_widget_set_valign(app->image_area, GTK_ALIGN_CENTER);
 
-        // Do NOT expand, so it takes only requested size (or min necessary)
-        gtk_widget_set_hexpand(app->picture, FALSE);
-        gtk_widget_set_vexpand(app->picture, FALSE);
+        gtk_widget_set_hexpand(app->image_area, FALSE);
+        gtk_widget_set_vexpand(app->image_area, FALSE);
 
         snprintf(buf, sizeof(buf), "Zoom: %.1f%%", app->zoom_factor * 100.0);
         gtk_label_set_text(GTK_LABEL(app->lbl_zoom), buf);
 
         gtk_widget_queue_draw(app->selection_area);
+        gtk_widget_queue_draw(app->image_area);
     }
 }
 
-// Callback for picture resize (to update zoom label in Fit Window mode)
+// Callback for resize
 static void
-on_picture_resize (GtkWidget *widget, gpointer user_data)
+on_image_area_resize (GtkWidget *widget, int width, int height, gpointer user_data)
 {
     ViewerApp *app = (ViewerApp *)user_data;
     if (app->fit_window) {
@@ -427,6 +431,75 @@ draw_colorbar_func (GtkDrawingArea *area,
     cairo_show_text(cr, buf);
 }
 
+// Drawing function for Image Area (Nearest Neighbor)
+static void
+draw_image_area_func (GtkDrawingArea *area,
+                      cairo_t        *cr,
+                      int             width,
+                      int             height,
+                      gpointer        user_data)
+{
+    ViewerApp *app = (ViewerApp *)user_data;
+
+    if (!app->image || !app->display_buffer) return;
+
+    int stride = cairo_format_stride_for_width(CAIRO_FORMAT_RGB24, app->img_width);
+    cairo_surface_t *surface = cairo_image_surface_create_for_data(
+        app->display_buffer,
+        CAIRO_FORMAT_RGB24,
+        app->img_width,
+        app->img_height,
+        stride
+    );
+
+    double off_x, off_y, scale;
+    get_image_screen_geometry(app, &off_x, &off_y, &scale);
+
+    // Geometry logic for DrawingArea vs Picture:
+    // With GtkPicture, the widget itself was sized/positioned.
+    // With GtkDrawingArea in Fill mode, the widget fills the allocated space.
+    // get_image_screen_geometry calculates offset within the widget.
+    // We must undo the coordinate translation we added for Overlay if we are drawing IN the widget.
+    // But wait, `get_image_screen_geometry` does `gtk_widget_compute_point` to Overlay.
+    // The `draw_func` coordinate system is local to `image_area`.
+    // So we should NOT include the translation to overlay.
+    // We need internal offset.
+
+    double int_off_x = 0;
+    double int_off_y = 0;
+
+    if (app->fit_window) {
+        double scale_x = (double)width / app->img_width;
+        double scale_y = (double)height / app->img_height;
+        scale = (scale_x < scale_y) ? scale_x : scale_y;
+
+        double display_w = app->img_width * scale;
+        double display_h = app->img_height * scale;
+
+        int_off_x = (width - display_w) / 2.0;
+        int_off_y = (height - display_h) / 2.0;
+    } else {
+        scale = app->zoom_factor;
+        // In Fixed mode, if widget is larger than image, center it.
+        // If image is larger, widget size request handles it, so offset is 0.
+        // But DrawingArea always fills allocation.
+        double display_w = app->img_width * scale;
+        double display_h = app->img_height * scale;
+
+        if (width > display_w) int_off_x = (width - display_w) / 2.0;
+        if (height > display_h) int_off_y = (height - display_h) / 2.0;
+    }
+
+    cairo_translate(cr, int_off_x, int_off_y);
+    cairo_scale(cr, scale, scale);
+
+    cairo_set_source_surface(cr, surface, 0, 0);
+    cairo_pattern_set_filter(cairo_get_source(cr), CAIRO_FILTER_NEAREST);
+    cairo_paint(cr);
+
+    cairo_surface_destroy(surface);
+}
+
 static void
 widget_to_image_coords(ViewerApp *app, double wx, double wy, int *ix, int *iy) {
     double offset_x, offset_y, scale;
@@ -461,7 +534,6 @@ draw_selection_func (GtkDrawingArea *area,
     get_image_screen_geometry(app, &offset_x, &offset_y, &scale);
 
     if (app->is_moving_selection) {
-        // Use current modified position
         x1 = app->sel_x1 * scale + offset_x;
         y1 = app->sel_y1 * scale + offset_y;
         x2 = app->sel_x2 * scale + offset_x;
@@ -469,24 +541,20 @@ draw_selection_func (GtkDrawingArea *area,
         x2 += scale;
         y2 += scale;
     } else if (app->is_dragging) {
-        // Drawing new selection
         x1 = app->start_x;
         y1 = app->start_y;
         x2 = app->curr_x;
         y2 = app->curr_y;
     } else {
-        // Convert image coords back to widget coords for display
         x1 = app->sel_x1 * scale + offset_x;
         y1 = app->sel_y1 * scale + offset_y;
         x2 = app->sel_x2 * scale + offset_x;
         y2 = app->sel_y2 * scale + offset_y;
-        x2 += scale; // Make it cover the pixel
+        x2 += scale;
         y2 += scale;
     }
 
-    // Removed transparent fill
-
-    cairo_set_source_rgb(cr, 1, 0, 0); // Red outline
+    cairo_set_source_rgb(cr, 1, 0, 0);
     cairo_set_line_width(cr, 2);
     cairo_rectangle(cr, x1, y1, x2 - x1, y2 - y1);
     cairo_stroke(cr);
@@ -500,12 +568,6 @@ drag_begin (GtkGestureDrag *gesture,
             gpointer        user_data)
 {
     ViewerApp *app = (ViewerApp *)user_data;
-
-    // We handle Left Click in this controller.
-    // If we added a separate controller for Right Click, this callback might be shared or separate.
-    // GtkGestureDrag handles all buttons unless filtered.
-    // Let's check the button.
-
     guint button = gtk_gesture_single_get_current_button(GTK_GESTURE_SINGLE(gesture));
 
     if (button == GDK_BUTTON_SECONDARY) { // Right Click
@@ -513,7 +575,6 @@ drag_begin (GtkGestureDrag *gesture,
         app->contrast_start_x = x;
         app->contrast_start_y = y;
 
-        // Disable auto scale first
         if (gtk_check_button_get_active(GTK_CHECK_BUTTON(app->check_min_auto)) ||
             gtk_check_button_get_active(GTK_CHECK_BUTTON(app->check_max_auto))) {
 
@@ -521,7 +582,6 @@ drag_begin (GtkGestureDrag *gesture,
             gtk_check_button_set_active(GTK_CHECK_BUTTON(app->check_max_auto), FALSE);
         }
 
-        // Capture start state
         app->contrast_start_min = app->min_val;
         app->contrast_start_max = app->max_val;
 
@@ -532,7 +592,6 @@ drag_begin (GtkGestureDrag *gesture,
         int ix, iy;
         widget_to_image_coords(app, x, y, &ix, &iy);
 
-        // Check if clicking inside existing selection
         if (app->selection_active &&
             ix >= app->sel_x1 && ix <= app->sel_x2 &&
             iy >= app->sel_y1 && iy <= app->sel_y2) {
@@ -546,8 +605,8 @@ drag_begin (GtkGestureDrag *gesture,
         } else {
             app->is_moving_selection = FALSE;
             app->is_dragging = TRUE;
-            app->selection_active = FALSE; // Clear old
-            gtk_widget_set_visible(app->box_stats, FALSE); // Hide stats on new drag
+            app->selection_active = FALSE;
+            gtk_widget_set_visible(app->box_stats, FALSE);
         }
 
         app->start_x = x;
@@ -569,10 +628,6 @@ drag_update (GtkGestureDrag *gesture,
     ViewerApp *app = (ViewerApp *)user_data;
 
     if (app->is_adjusting_contrast) {
-        // DS9 Behavior:
-        // Horizontal: Bias (Center)
-        // Vertical: Contrast (Width)
-
         int width = gtk_widget_get_width(app->selection_area);
         int height = gtk_widget_get_height(app->selection_area);
         if (width <= 0) width = 1;
@@ -582,28 +637,16 @@ drag_update (GtkGestureDrag *gesture,
         double start_width = (app->contrast_start_max - app->contrast_start_min);
         if (start_width == 0) start_width = 1.0;
 
-        // Scale factors logic (approximation of DS9 feel)
         double range = start_width;
-
-        // Center shift: proportional to width movement
         double shift = (offset_x / (double)width) * range;
         double new_center = start_center + shift;
 
-        // Width scale: exponential? Or linear?
-        // DS9 is often exponential for contrast.
-        // Moving UP (negative y) decreases contrast (increases width)?
-        // Or increases contrast (decreases width)?
-        // Usually dragging UP increases value, dragging RIGHT increases value.
-        // Let's assume dragging UP increases contrast (makes width smaller), DOWN makes width larger (lower contrast).
-        // Let's use exp factor.
         double scale_factor = exp( -offset_y / (double)height * 4.0 );
         double new_width = start_width / scale_factor;
 
-        // Update Min/Max
         double new_min = new_center - new_width / 2.0;
         double new_max = new_center + new_width / 2.0;
 
-        // Apply to controls
         gtk_spin_button_set_value(GTK_SPIN_BUTTON(app->spin_min), new_min);
         gtk_spin_button_set_value(GTK_SPIN_BUTTON(app->spin_max), new_max);
 
@@ -626,7 +669,6 @@ drag_update (GtkGestureDrag *gesture,
         app->sel_x1 = app->sel_orig_x1 + idx;
         app->sel_y1 = app->sel_orig_y1 + idy;
 
-        // Clamp
         if (app->sel_x1 < 0) app->sel_x1 = 0;
         if (app->sel_y1 < 0) app->sel_y1 = 0;
         if (app->sel_x1 + w >= img_w) app->sel_x1 = img_w - 1 - w;
@@ -635,7 +677,7 @@ drag_update (GtkGestureDrag *gesture,
         app->sel_x2 = app->sel_x1 + w;
         app->sel_y2 = app->sel_y1 + h;
 
-        app->force_redraw = TRUE; // Update scaling live
+        app->force_redraw = TRUE;
     } else if (app->is_dragging) {
         app->curr_x = app->start_x + offset_x;
         app->curr_y = app->start_y + offset_y;
@@ -658,13 +700,12 @@ drag_end (GtkGestureDrag *gesture,
 
     if (app->is_moving_selection) {
         app->is_moving_selection = FALSE;
-        app->selection_active = TRUE; // Ensure it stays active
+        app->selection_active = TRUE;
     } else if (app->is_dragging) {
         app->is_dragging = FALSE;
         app->curr_x = app->start_x + offset_x;
         app->curr_y = app->start_y + offset_y;
 
-        // If drag is very small, maybe treat as clear?
         if (fabs(offset_x) < 2 && fabs(offset_y) < 2) {
             app->selection_active = FALSE;
             gtk_widget_set_visible(app->box_stats, FALSE);
@@ -699,7 +740,7 @@ calculate_roi_stats(ViewerApp *app, void *raw_data, int width, int height, uint8
     if (!app->selection_active) return;
 
     int x1 = app->sel_x1;
-    int x2 = app->sel_x2 + 1; // Inclusive to exclusive
+    int x2 = app->sel_x2 + 1;
     int y1 = app->sel_y1;
     int y2 = app->sel_y2 + 1;
 
@@ -798,14 +839,23 @@ draw_image (ViewerApp *app)
     int width = app->image->md->size[0];
     int height = app->image->md->size[1];
     uint8_t datatype = app->image->md->datatype;
+    app->img_width = width;
+    app->img_height = height;
 
-    // Calculate Stats if selection active
     if (app->selection_active) {
         calculate_roi_stats(app, raw_data, width, height, datatype);
     }
 
-    int stride = width * 4;
-    guchar *pixels = g_malloc (stride * height);
+    int stride = cairo_format_stride_for_width(CAIRO_FORMAT_RGB24, width);
+    size_t required_size = stride * height;
+
+    if (!app->display_buffer || app->display_buffer_size < required_size) {
+        if (app->display_buffer) free(app->display_buffer);
+        app->display_buffer = malloc(required_size);
+        app->display_buffer_size = required_size;
+    }
+
+    guchar *pixels = app->display_buffer;
 
     double min_val = 1e30;
     double max_val = -1e30;
@@ -821,7 +871,6 @@ draw_image (ViewerApp *app)
             x_end = app->sel_x2 + 1;
             y_start = app->sel_y1;
             y_end = app->sel_y2 + 1;
-            // Clamp
             if (x_start < 0) x_start = 0;
             if (y_start < 0) y_start = 0;
             if (x_end > width) x_end = width;
@@ -873,7 +922,9 @@ draw_image (ViewerApp *app)
         gtk_spin_button_set_value(GTK_SPIN_BUTTON(app->spin_max), max_val);
     }
 
+    // Populate display buffer
     for (int y = 0; y < height; y++) {
+        uint32_t *row = (uint32_t*)(pixels + y * stride);
         for (int x = 0; x < width; x++) {
             int idx = y * width + x;
              double val = 0;
@@ -893,29 +944,21 @@ draw_image (ViewerApp *app)
                 val = ((uint32_t*)raw_data)[idx];
             }
 
-            if (val < min_val) val = min_val;
-            if (val > max_val) val = max_val;
+            double norm = (val - min_val) / (max_val - min_val);
+            if (norm < 0) norm = 0;
+            if (norm > 1) norm = 1;
+            uint8_t pixel_val = (uint8_t)(norm * 255.0);
 
-            uint8_t pixel_val = (uint8_t)((val - min_val) / (max_val - min_val) * 255.0);
-
-            int p_idx = (y * width + x) * 4;
-            pixels[p_idx + 0] = pixel_val;
-            pixels[p_idx + 1] = pixel_val;
-            pixels[p_idx + 2] = pixel_val;
-            pixels[p_idx + 3] = 255;
+            // CAIRO_FORMAT_RGB24 is 32-bit: XRGB (little endian -> B G R X)
+            // We want grayscale. B=G=R=pixel_val.
+            row[x] = (255 << 24) | (pixel_val << 16) | (pixel_val << 8) | pixel_val;
         }
     }
 
-    GBytes *bytes = g_bytes_new_take (pixels, stride * height);
-    GdkTexture *texture = gdk_memory_texture_new (width, height, GDK_MEMORY_R8G8B8A8, bytes, stride);
-    g_bytes_unref (bytes);
+    gtk_widget_queue_draw(app->image_area);
 
-    gtk_picture_set_paintable (GTK_PICTURE (app->picture), GDK_PAINTABLE (texture));
-    g_object_unref (texture);
-
-    // Initial zoom layout on first load if fit_window
-    if (app->fit_window && gtk_widget_get_width(app->picture) > 0) {
-        update_zoom_layout(app);
+    if (app->fit_window && gtk_widget_get_width(app->image_area) > 0) {
+        // Just update layout params if needed, mostly handled by draw func
     }
 }
 
@@ -932,7 +975,6 @@ update_display (gpointer user_data)
              return G_SOURCE_CONTINUE;
         }
         printf("Connected to stream: %s\n", app->image_name);
-        // Reset zoom on load
         app->fit_window = TRUE;
         if (app->btn_fit_window) gtk_check_button_set_active(GTK_CHECK_BUTTON(app->btn_fit_window), TRUE);
     }
@@ -960,15 +1002,16 @@ activate (GtkApplication *app,
     GtkWidget *window;
     GtkWidget *hbox;
     GtkWidget *vbox_controls;
+    GtkWidget *vbox_right;
     GtkWidget *scrolled_window;
     GtkWidget *overlay;
     GtkWidget *label;
     GtkWidget *btn_autoscale;
     GtkWidget *btn_reset;
+    GtkWidget *btn_reset_colorbar;
     GtkGesture *drag_controller;
     GtkEventController *scroll_controller;
     GtkWidget *frame_stats;
-    GtkWidget *vbox_stats;
 
     window = gtk_application_window_new (app);
     gtk_window_set_title (GTK_WINDOW (window), "ImageStreamIO Viewer");
@@ -977,7 +1020,7 @@ activate (GtkApplication *app,
     hbox = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 5);
     gtk_window_set_child (GTK_WINDOW (window), hbox);
 
-    // Sidebar Controls
+    // Sidebar Controls (Left)
     vbox_controls = gtk_box_new (GTK_ORIENTATION_VERTICAL, 10);
     gtk_widget_set_size_request (vbox_controls, 200, -1);
     gtk_widget_set_margin_start (vbox_controls, 10);
@@ -998,7 +1041,7 @@ activate (GtkApplication *app,
 
     const char *zoom_levels[] = {"1/8x", "1/4x", "1/2x", "1x", "2x", "4x", "8x", NULL};
     viewer->dropdown_zoom = gtk_drop_down_new_from_strings (zoom_levels);
-    gtk_drop_down_set_selected(GTK_DROP_DOWN(viewer->dropdown_zoom), 3); // 1x
+    gtk_drop_down_set_selected(GTK_DROP_DOWN(viewer->dropdown_zoom), 3);
     g_signal_connect (viewer->dropdown_zoom, "notify::selected", G_CALLBACK (on_dropdown_zoom_changed), viewer);
     gtk_box_append (GTK_BOX (vbox_controls), viewer->dropdown_zoom);
 
@@ -1033,15 +1076,61 @@ activate (GtkApplication *app,
     g_signal_connect (viewer->spin_max, "value-changed", G_CALLBACK (on_spin_max_changed), viewer);
     gtk_box_append (GTK_BOX (vbox_controls), viewer->spin_max);
 
-    // Auto Scale Button
+    // Buttons
     btn_autoscale = gtk_button_new_with_label ("Auto Scale");
     g_signal_connect (btn_autoscale, "clicked", G_CALLBACK (on_btn_autoscale_clicked), viewer);
     gtk_box_append (GTK_BOX (vbox_controls), btn_autoscale);
 
-    // Reset Selection Button
+    btn_reset_colorbar = gtk_button_new_with_label ("Reset Colorbar");
+    g_signal_connect (btn_reset_colorbar, "clicked", G_CALLBACK (on_btn_reset_colorbar_clicked), viewer);
+    gtk_box_append (GTK_BOX (vbox_controls), btn_reset_colorbar);
+
     btn_reset = gtk_button_new_with_label ("Reset Selection");
     g_signal_connect (btn_reset, "clicked", G_CALLBACK (on_btn_reset_selection_clicked), viewer);
     gtk_box_append (GTK_BOX (vbox_controls), btn_reset);
+
+
+    // Image Display Area with Overlay (Center)
+    scrolled_window = gtk_scrolled_window_new ();
+    gtk_widget_set_vexpand (scrolled_window, TRUE);
+    gtk_widget_set_hexpand (scrolled_window, TRUE);
+    gtk_box_append (GTK_BOX (hbox), scrolled_window);
+
+    scroll_controller = gtk_event_controller_scroll_new (GTK_EVENT_CONTROLLER_SCROLL_VERTICAL);
+    g_signal_connect (scroll_controller, "scroll", G_CALLBACK (on_scroll), viewer);
+    gtk_widget_add_controller (scrolled_window, scroll_controller);
+
+    overlay = gtk_overlay_new();
+    gtk_scrolled_window_set_child (GTK_SCROLLED_WINDOW (scrolled_window), overlay);
+
+    // Using DrawingArea instead of Picture for manual nearest-neighbor drawing
+    viewer->image_area = gtk_drawing_area_new();
+    gtk_drawing_area_set_draw_func(GTK_DRAWING_AREA(viewer->image_area), draw_image_area_func, viewer, NULL);
+    g_signal_connect(viewer->image_area, "resize", G_CALLBACK(on_image_area_resize), viewer);
+    gtk_overlay_set_child(GTK_OVERLAY(overlay), viewer->image_area);
+
+    // Selection Overlay
+    viewer->selection_area = gtk_drawing_area_new();
+    gtk_widget_set_hexpand(viewer->selection_area, TRUE);
+    gtk_widget_set_vexpand(viewer->selection_area, TRUE);
+    gtk_drawing_area_set_draw_func(GTK_DRAWING_AREA(viewer->selection_area), draw_selection_func, viewer, NULL);
+    gtk_overlay_add_overlay(GTK_OVERLAY(overlay), viewer->selection_area);
+
+    drag_controller = gtk_gesture_drag_new();
+    gtk_gesture_single_set_button(GTK_GESTURE_SINGLE(drag_controller), 0);
+    g_signal_connect(drag_controller, "drag-begin", G_CALLBACK(drag_begin), viewer);
+    g_signal_connect(drag_controller, "drag-update", G_CALLBACK(drag_update), viewer);
+    g_signal_connect(drag_controller, "drag-end", G_CALLBACK(drag_end), viewer);
+    gtk_widget_add_controller(viewer->selection_area, GTK_EVENT_CONTROLLER(drag_controller));
+
+
+    // Right Sidebar (Stats + Colorbar)
+    vbox_right = gtk_box_new(GTK_ORIENTATION_VERTICAL, 10);
+    gtk_widget_set_margin_start(vbox_right, 10);
+    gtk_widget_set_margin_end(vbox_right, 10);
+    gtk_widget_set_margin_top(vbox_right, 10);
+    gtk_widget_set_margin_bottom(vbox_right, 10);
+    gtk_box_append(GTK_BOX(hbox), vbox_right);
 
     // Stats Box
     frame_stats = gtk_frame_new("ROI Stats");
@@ -1051,7 +1140,7 @@ activate (GtkApplication *app,
     gtk_widget_set_margin_top(viewer->box_stats, 5);
     gtk_widget_set_margin_bottom(viewer->box_stats, 5);
     gtk_frame_set_child(GTK_FRAME(frame_stats), viewer->box_stats);
-    gtk_box_append(GTK_BOX(vbox_controls), frame_stats);
+    gtk_box_append(GTK_BOX(vbox_right), frame_stats);
 
     viewer->lbl_stat_min = gtk_label_new("Min: -");
     gtk_widget_set_halign(viewer->lbl_stat_min, GTK_ALIGN_START);
@@ -1079,49 +1168,13 @@ activate (GtkApplication *app,
 
     gtk_widget_set_visible(viewer->box_stats, FALSE);
 
-
-    // Image Display Area with Overlay
-    scrolled_window = gtk_scrolled_window_new ();
-    gtk_widget_set_vexpand (scrolled_window, TRUE);
-    gtk_widget_set_hexpand (scrolled_window, TRUE);
-    gtk_box_append (GTK_BOX (hbox), scrolled_window);
-
-    // Add scroll controller for zoom
-    scroll_controller = gtk_event_controller_scroll_new (GTK_EVENT_CONTROLLER_SCROLL_VERTICAL);
-    g_signal_connect (scroll_controller, "scroll", G_CALLBACK (on_scroll), viewer);
-    gtk_widget_add_controller (scrolled_window, scroll_controller);
-
-    overlay = gtk_overlay_new();
-    gtk_scrolled_window_set_child (GTK_SCROLLED_WINDOW (scrolled_window), overlay);
-
-    viewer->picture = gtk_picture_new ();
-    // Use resize signal to update zoom label when Fit Window is on
-    g_signal_connect(viewer->picture, "resize", G_CALLBACK(on_picture_resize), viewer);
-
-    // Add Picture as child
-    gtk_overlay_set_child(GTK_OVERLAY(overlay), viewer->picture);
-
-    // Selection Overlay (Drawing Area)
-    viewer->selection_area = gtk_drawing_area_new();
-    gtk_widget_set_hexpand(viewer->selection_area, TRUE);
-    gtk_widget_set_vexpand(viewer->selection_area, TRUE);
-    gtk_drawing_area_set_draw_func(GTK_DRAWING_AREA(viewer->selection_area), draw_selection_func, viewer, NULL);
-    gtk_overlay_add_overlay(GTK_OVERLAY(overlay), viewer->selection_area);
-
-    // Gestures for dragging selection
-    drag_controller = gtk_gesture_drag_new();
-    gtk_gesture_single_set_button(GTK_GESTURE_SINGLE(drag_controller), 0); // Accept all buttons
-    g_signal_connect(drag_controller, "drag-begin", G_CALLBACK(drag_begin), viewer);
-    g_signal_connect(drag_controller, "drag-update", G_CALLBACK(drag_update), viewer);
-    g_signal_connect(drag_controller, "drag-end", G_CALLBACK(drag_end), viewer);
-    gtk_widget_add_controller(viewer->selection_area, GTK_EVENT_CONTROLLER(drag_controller));
-
-
     // Colorbar
     viewer->colorbar = gtk_drawing_area_new ();
     gtk_widget_set_size_request (viewer->colorbar, 60, -1);
+    gtk_widget_set_vexpand(viewer->colorbar, TRUE);
     gtk_drawing_area_set_draw_func (GTK_DRAWING_AREA (viewer->colorbar), draw_colorbar_func, viewer, NULL);
-    gtk_box_append (GTK_BOX (hbox), viewer->colorbar);
+    gtk_box_append (GTK_BOX (vbox_right), viewer->colorbar);
+
 
     // Initialize UI State based on CLI args
     gtk_check_button_set_active (GTK_CHECK_BUTTON (viewer->check_min_auto), !viewer->fixed_min);
@@ -1179,6 +1232,7 @@ main (int    argc,
         ImageStreamIO_closeIm(viewer.image);
         free(viewer.image);
     }
+    if (viewer.display_buffer) free(viewer.display_buffer);
 
     return status;
 }
