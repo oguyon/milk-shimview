@@ -25,6 +25,10 @@ typedef struct {
     gboolean fixed_min;
     gboolean fixed_max;
 
+    // Colormap Windowing (0.0 - 1.0 relative to min_val/max_val)
+    double cmap_min;
+    double cmap_max;
+
     // Actual scaling used for display (for colorbar)
     double current_min;
     double current_max;
@@ -41,8 +45,8 @@ typedef struct {
 
     // Contrast Adjustment state (Right Click)
     gboolean is_adjusting_contrast;
-    double contrast_start_min;
-    double contrast_start_max;
+    double contrast_start_cmap_min;
+    double contrast_start_cmap_max;
     double contrast_start_x;
     double contrast_start_y;
 
@@ -126,6 +130,7 @@ static void update_zoom_layout(ViewerApp *app);
 static void get_image_screen_geometry(ViewerApp *app, double *offset_x, double *offset_y, double *scale);
 static void widget_to_image_coords(ViewerApp *app, double wx, double wy, int *ix, int *iy);
 static gboolean update_display (gpointer user_data);
+static void on_btn_autoscale_clicked (GtkButton *btn, gpointer user_data);
 
 // UI Callbacks
 static void
@@ -216,9 +221,18 @@ static void
 on_btn_reset_colorbar_clicked (GtkButton *btn, gpointer user_data)
 {
     ViewerApp *app = (ViewerApp *)user_data;
-    // Force Auto On
+
+    // Reset Colormap windowing
+    app->cmap_min = 0.0;
+    app->cmap_max = 1.0;
+
+    // Force Auto On (reset absolute limits)
+    on_btn_autoscale_clicked(NULL, app);
+    // Wait, reusing on_btn_autoscale_clicked might toggle off if already on.
+    // Explicitly set to Auto
     gtk_check_button_set_active(GTK_CHECK_BUTTON(app->check_min_auto), TRUE);
     gtk_check_button_set_active(GTK_CHECK_BUTTON(app->check_max_auto), TRUE);
+
     app->force_redraw = TRUE;
 }
 
@@ -236,15 +250,26 @@ static void
 on_fit_window_toggled (GtkCheckButton *btn, gpointer user_data)
 {
     ViewerApp *app = (ViewerApp *)user_data;
-    app->fit_window = gtk_check_button_get_active(btn);
+    gboolean new_state = gtk_check_button_get_active(btn);
 
-    if (!app->fit_window) {
-        double off_x, off_y, scale;
-        get_image_screen_geometry(app, &off_x, &off_y, &scale);
-        if (scale > 0) app->zoom_factor = scale;
-        else app->zoom_factor = 1.0;
+    if (app->fit_window && !new_state) {
+        // Switching from Fit to Manual.
+        // Calculate the scale that was being used so we can preserve it.
+        // We can't use get_image_screen_geometry directly because it relies on app->fit_window flag.
+
+        double img_w = (double)(app->image ? app->image->md->size[0] : 1);
+        double img_h = (double)(app->image ? app->image->md->size[1] : 1);
+        int widget_w = gtk_widget_get_width(app->image_area);
+        int widget_h = gtk_widget_get_height(app->image_area);
+
+        if (img_w > 0 && img_h > 0 && widget_w > 0 && widget_h > 0) {
+             double scale_x = (double)widget_w / img_w;
+             double scale_y = (double)widget_h / img_h;
+             app->zoom_factor = (scale_x < scale_y) ? scale_x : scale_y;
+        }
     }
 
+    app->fit_window = new_state;
     update_zoom_layout(app);
 }
 
@@ -438,15 +463,23 @@ draw_colorbar_func (GtkDrawingArea *area,
 
     if (bar_height <= 0) return;
 
-    cairo_pattern_t *pat = cairo_pattern_create_linear (0, margin_top + bar_height, 0, margin_top);
-    cairo_pattern_add_color_stop_rgb (pat, 0, 0, 0, 0); // Black at bottom
-    cairo_pattern_add_color_stop_rgb (pat, 1, 1, 1, 1); // White at top
+    // Draw Gradient respecting cmap_min/cmap_max
+    // We iterate pixels vertically and calculate color
 
-    cairo_rectangle (cr, bar_x, margin_top, bar_width, bar_height);
-    cairo_set_source (cr, pat);
-    cairo_fill (cr);
-    cairo_pattern_destroy (pat);
+    for (int y = 0; y < bar_height; y++) {
+        double t = 1.0 - (double)y / (double)bar_height; // 0 at bottom, 1 at top
 
+        // Apply mapping
+        double val = (t - app->cmap_min) / (app->cmap_max - app->cmap_min);
+        if (val < 0) val = 0;
+        if (val > 1) val = 1;
+
+        cairo_set_source_rgb(cr, val, val, val);
+        cairo_rectangle(cr, bar_x, margin_top + y, bar_width, 1);
+        cairo_fill(cr);
+    }
+
+    // Draw Border
     cairo_set_source_rgb(cr, 0, 0, 0);
     cairo_set_line_width(cr, 1);
     cairo_rectangle (cr, bar_x, margin_top, bar_width, bar_height);
@@ -459,12 +492,12 @@ draw_colorbar_func (GtkDrawingArea *area,
     char buf[64];
     cairo_text_extents_t extents;
 
-    snprintf(buf, sizeof(buf), "%.2g", app->current_max);
+    snprintf(buf, sizeof(buf), "%.2g", app->max_val); // Label is Data Range
     cairo_text_extents(cr, buf, &extents);
     cairo_move_to(cr, (width - extents.width)/2, margin_top - 5);
     cairo_show_text(cr, buf);
 
-    snprintf(buf, sizeof(buf), "%.2g", app->current_min);
+    snprintf(buf, sizeof(buf), "%.2g", app->min_val); // Label is Data Range
     cairo_text_extents(cr, buf, &extents);
     cairo_move_to(cr, (width - extents.width)/2, height - margin_bottom + extents.height + 5);
     cairo_show_text(cr, buf);
@@ -625,17 +658,8 @@ drag_begin (GtkGestureDrag *gesture,
         app->is_adjusting_contrast = TRUE;
         app->contrast_start_x = x;
         app->contrast_start_y = y;
-
-        if (gtk_check_button_get_active(GTK_CHECK_BUTTON(app->check_min_auto)) ||
-            gtk_check_button_get_active(GTK_CHECK_BUTTON(app->check_max_auto))) {
-
-            gtk_check_button_set_active(GTK_CHECK_BUTTON(app->check_min_auto), FALSE);
-            gtk_check_button_set_active(GTK_CHECK_BUTTON(app->check_max_auto), FALSE);
-        }
-
-        app->contrast_start_min = app->min_val;
-        app->contrast_start_max = app->max_val;
-
+        app->contrast_start_cmap_min = app->cmap_min;
+        app->contrast_start_cmap_max = app->cmap_max;
         return;
     }
 
@@ -684,22 +708,33 @@ drag_update (GtkGestureDrag *gesture,
         if (width <= 0) width = 1;
         if (height <= 0) height = 1;
 
-        double start_center = (app->contrast_start_max + app->contrast_start_min) / 2.0;
-        double start_width = (app->contrast_start_max - app->contrast_start_min);
-        if (start_width == 0) start_width = 1.0;
+        double start_center = (app->contrast_start_cmap_max + app->contrast_start_cmap_min) / 2.0;
+        double start_width = (app->contrast_start_cmap_max - app->contrast_start_cmap_min);
+        // Avoid zero width
+        if (fabs(start_width) < 1e-6) start_width = 0.01;
 
+        // Scale factors logic (approximation of DS9 feel)
         double range = start_width;
-        double shift = (offset_x / (double)width) * range;
-        double new_center = start_center + shift;
 
-        double scale_factor = exp( -offset_y / (double)height * 4.0 );
-        double new_width = start_width / scale_factor;
+        // Horizontal: Shift Center
+        double shift = (offset_x / (double)width) * range; // simple linear shift
+        double new_center = start_center - shift; // Invert? Try standard
 
-        double new_min = new_center - new_width / 2.0;
-        double new_max = new_center + new_width / 2.0;
+        // Vertical: Scale Width (Contrast)
+        // Drag Up -> Smaller Width (Higher Contrast)
+        // Drag Down -> Larger Width (Lower Contrast)
+        double scale_factor = exp( offset_y / (double)height * 4.0 );
+        double new_width = start_width * scale_factor;
 
-        gtk_spin_button_set_value(GTK_SPIN_BUTTON(app->spin_min), new_min);
-        gtk_spin_button_set_value(GTK_SPIN_BUTTON(app->spin_max), new_max);
+        double new_cmin = new_center - new_width / 2.0;
+        double new_cmax = new_center + new_width / 2.0;
+
+        // Optional: Clamp? DS9 allows going way out.
+        // But for display logic 0..1 is the range.
+        // Let's not clamp too strictly, but maybe ensure sane range.
+
+        app->cmap_min = new_cmin;
+        app->cmap_max = new_cmax;
 
         app->force_redraw = TRUE;
         return;
@@ -928,6 +963,11 @@ draw_image (ViewerApp *app)
     app->img_width = width;
     app->img_height = height;
 
+    // Calculate Stats if selection active
+    if (app->selection_active) {
+        calculate_roi_stats(app, raw_data, width, height, datatype);
+    }
+
     int stride = cairo_format_stride_for_width(CAIRO_FORMAT_RGB24, width);
     size_t required_size = stride * height;
 
@@ -1004,10 +1044,11 @@ draw_image (ViewerApp *app)
         gtk_spin_button_set_value(GTK_SPIN_BUTTON(app->spin_max), max_val);
     }
 
-    // Calculate Stats if selection active - NOW using updated current_min/max
-    if (app->selection_active) {
-        calculate_roi_stats(app, raw_data, width, height, datatype);
-    }
+    // Effective min/max for colormap
+    double eff_min = min_val + app->cmap_min * (max_val - min_val);
+    double eff_max = min_val + app->cmap_max * (max_val - min_val);
+
+    if (fabs(eff_max - eff_min) < 1e-9) eff_max = eff_min + 1.0;
 
     // Populate display buffer
     for (int y = 0; y < height; y++) {
@@ -1031,7 +1072,7 @@ draw_image (ViewerApp *app)
                 val = ((uint32_t*)raw_data)[idx];
             }
 
-            double norm = (val - min_val) / (max_val - min_val);
+            double norm = (val - eff_min) / (eff_max - eff_min);
             if (norm < 0) norm = 0;
             if (norm > 1) norm = 1;
             uint8_t pixel_val = (uint8_t)(norm * 255.0);
@@ -1057,6 +1098,8 @@ update_display (gpointer user_data)
         }
         printf("Connected to stream: %s\n", app->image_name);
         app->fit_window = TRUE;
+        app->cmap_min = 0.0;
+        app->cmap_max = 1.0;
         if (app->btn_fit_window) gtk_check_button_set_active(GTK_CHECK_BUTTON(app->btn_fit_window), TRUE);
     }
 
@@ -1301,6 +1344,10 @@ activate (GtkApplication *app,
 
     viewer->fit_window = TRUE;
     viewer->zoom_factor = 1.0;
+
+    // Set initial colormap range
+    viewer->cmap_min = 0.0;
+    viewer->cmap_max = 1.0;
 
     // Default 30ms = 33Hz
     viewer->timeout_id = g_timeout_add (30, update_display, viewer);
