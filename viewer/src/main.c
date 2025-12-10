@@ -109,12 +109,12 @@ typedef struct {
 
     // Stats Widgets
     GtkWidget *box_stats;
-    GtkWidget *lbl_stat_min;
-    GtkWidget *lbl_stat_max;
-    GtkWidget *lbl_stat_mean;
-    GtkWidget *lbl_stat_median;
-    GtkWidget *lbl_stat_p01;
-    GtkWidget *lbl_stat_p09;
+    GtkWidget *entry_stat_min;
+    GtkWidget *entry_stat_max;
+    GtkWidget *entry_stat_mean;
+    GtkWidget *entry_stat_median;
+    GtkWidget *entry_stat_p01;
+    GtkWidget *entry_stat_p09;
 
     GtkWidget *check_histogram;
     GtkWidget *check_hist_log;
@@ -820,6 +820,12 @@ draw_roi_area_func (GtkDrawingArea *area,
     cairo_pattern_set_filter(cairo_get_source(cr), CAIRO_FILTER_NEAREST);
     cairo_paint(cr);
 
+    // Draw red outline around the ROI content in the expanded view
+    cairo_set_source_rgb(cr, 1, 0, 0);
+    cairo_set_line_width(cr, 2.0 / scale); // Keep line width constant in screen pixels
+    cairo_rectangle(cr, app->sel_x1, app->sel_y1, roi_w, roi_h);
+    cairo_stroke(cr);
+
     cairo_surface_destroy(surface);
 }
 
@@ -1220,23 +1226,23 @@ calculate_roi_stats(ViewerApp *app, void *raw_data, int width, int height, uint8
     free(values);
 
     char buf[64];
-    snprintf(buf, sizeof(buf), "Min: %.4g", min_v);
-    gtk_label_set_text(GTK_LABEL(app->lbl_stat_min), buf);
+    snprintf(buf, sizeof(buf), "%.4g", min_v);
+    gtk_editable_set_text(GTK_EDITABLE(app->entry_stat_min), buf);
 
-    snprintf(buf, sizeof(buf), "Max: %.4g", max_v);
-    gtk_label_set_text(GTK_LABEL(app->lbl_stat_max), buf);
+    snprintf(buf, sizeof(buf), "%.4g", max_v);
+    gtk_editable_set_text(GTK_EDITABLE(app->entry_stat_max), buf);
 
-    snprintf(buf, sizeof(buf), "Mean: %.4g", mean);
-    gtk_label_set_text(GTK_LABEL(app->lbl_stat_mean), buf);
+    snprintf(buf, sizeof(buf), "%.4g", mean);
+    gtk_editable_set_text(GTK_EDITABLE(app->entry_stat_mean), buf);
 
-    snprintf(buf, sizeof(buf), "Median: %.4g", median);
-    gtk_label_set_text(GTK_LABEL(app->lbl_stat_median), buf);
+    snprintf(buf, sizeof(buf), "%.4g", median);
+    gtk_editable_set_text(GTK_EDITABLE(app->entry_stat_median), buf);
 
-    snprintf(buf, sizeof(buf), "P 0.1: %.4g", p01);
-    gtk_label_set_text(GTK_LABEL(app->lbl_stat_p01), buf);
+    snprintf(buf, sizeof(buf), "%.4g", p01);
+    gtk_editable_set_text(GTK_EDITABLE(app->entry_stat_p01), buf);
 
-    snprintf(buf, sizeof(buf), "P 0.9: %.4g", p09);
-    gtk_label_set_text(GTK_LABEL(app->lbl_stat_p09), buf);
+    snprintf(buf, sizeof(buf), "%.4g", p09);
+    gtk_editable_set_text(GTK_EDITABLE(app->entry_stat_p09), buf);
 }
 
 static void
@@ -1683,29 +1689,62 @@ activate (GtkApplication *app,
     // Add stats frame to right of colorbar
     gtk_box_append(GTK_BOX(hbox_right), frame_stats);
 
-    viewer->lbl_stat_min = gtk_label_new("Min: -");
-    gtk_widget_set_halign(viewer->lbl_stat_min, GTK_ALIGN_START);
-    gtk_box_append(GTK_BOX(viewer->box_stats), viewer->lbl_stat_min);
+    GtkWidget *stat_row;
+    GtkWidget *lbl;
 
-    viewer->lbl_stat_max = gtk_label_new("Max: -");
-    gtk_widget_set_halign(viewer->lbl_stat_max, GTK_ALIGN_START);
-    gtk_box_append(GTK_BOX(viewer->box_stats), viewer->lbl_stat_max);
+    // Min / Max
+    stat_row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 5);
+    gtk_box_append(GTK_BOX(viewer->box_stats), stat_row);
 
-    viewer->lbl_stat_mean = gtk_label_new("Mean: -");
-    gtk_widget_set_halign(viewer->lbl_stat_mean, GTK_ALIGN_START);
-    gtk_box_append(GTK_BOX(viewer->box_stats), viewer->lbl_stat_mean);
+    gtk_box_append(GTK_BOX(stat_row), gtk_label_new("Min"));
+    viewer->entry_stat_min = gtk_entry_new();
+    gtk_editable_set_editable(GTK_EDITABLE(viewer->entry_stat_min), FALSE);
+    gtk_widget_set_can_focus(viewer->entry_stat_min, FALSE);
+    gtk_widget_set_size_request(viewer->entry_stat_min, 60, -1);
+    gtk_box_append(GTK_BOX(stat_row), viewer->entry_stat_min);
 
-    viewer->lbl_stat_median = gtk_label_new("Median: -");
-    gtk_widget_set_halign(viewer->lbl_stat_median, GTK_ALIGN_START);
-    gtk_box_append(GTK_BOX(viewer->box_stats), viewer->lbl_stat_median);
+    gtk_box_append(GTK_BOX(stat_row), gtk_label_new("Max"));
+    viewer->entry_stat_max = gtk_entry_new();
+    gtk_editable_set_editable(GTK_EDITABLE(viewer->entry_stat_max), FALSE);
+    gtk_widget_set_can_focus(viewer->entry_stat_max, FALSE);
+    gtk_widget_set_size_request(viewer->entry_stat_max, 60, -1);
+    gtk_box_append(GTK_BOX(stat_row), viewer->entry_stat_max);
 
-    viewer->lbl_stat_p01 = gtk_label_new("P 0.1: -");
-    gtk_widget_set_halign(viewer->lbl_stat_p01, GTK_ALIGN_START);
-    gtk_box_append(GTK_BOX(viewer->box_stats), viewer->lbl_stat_p01);
+    // Mean / Median
+    stat_row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 5);
+    gtk_box_append(GTK_BOX(viewer->box_stats), stat_row);
 
-    viewer->lbl_stat_p09 = gtk_label_new("P 0.9: -");
-    gtk_widget_set_halign(viewer->lbl_stat_p09, GTK_ALIGN_START);
-    gtk_box_append(GTK_BOX(viewer->box_stats), viewer->lbl_stat_p09);
+    gtk_box_append(GTK_BOX(stat_row), gtk_label_new("Avg"));
+    viewer->entry_stat_mean = gtk_entry_new();
+    gtk_editable_set_editable(GTK_EDITABLE(viewer->entry_stat_mean), FALSE);
+    gtk_widget_set_can_focus(viewer->entry_stat_mean, FALSE);
+    gtk_widget_set_size_request(viewer->entry_stat_mean, 60, -1);
+    gtk_box_append(GTK_BOX(stat_row), viewer->entry_stat_mean);
+
+    gtk_box_append(GTK_BOX(stat_row), gtk_label_new("Med"));
+    viewer->entry_stat_median = gtk_entry_new();
+    gtk_editable_set_editable(GTK_EDITABLE(viewer->entry_stat_median), FALSE);
+    gtk_widget_set_can_focus(viewer->entry_stat_median, FALSE);
+    gtk_widget_set_size_request(viewer->entry_stat_median, 60, -1);
+    gtk_box_append(GTK_BOX(stat_row), viewer->entry_stat_median);
+
+    // P01 / P09
+    stat_row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 5);
+    gtk_box_append(GTK_BOX(viewer->box_stats), stat_row);
+
+    gtk_box_append(GTK_BOX(stat_row), gtk_label_new("P01"));
+    viewer->entry_stat_p01 = gtk_entry_new();
+    gtk_editable_set_editable(GTK_EDITABLE(viewer->entry_stat_p01), FALSE);
+    gtk_widget_set_can_focus(viewer->entry_stat_p01, FALSE);
+    gtk_widget_set_size_request(viewer->entry_stat_p01, 60, -1);
+    gtk_box_append(GTK_BOX(stat_row), viewer->entry_stat_p01);
+
+    gtk_box_append(GTK_BOX(stat_row), gtk_label_new("P09"));
+    viewer->entry_stat_p09 = gtk_entry_new();
+    gtk_editable_set_editable(GTK_EDITABLE(viewer->entry_stat_p09), FALSE);
+    gtk_widget_set_can_focus(viewer->entry_stat_p09, FALSE);
+    gtk_widget_set_size_request(viewer->entry_stat_p09, 60, -1);
+    gtk_box_append(GTK_BOX(stat_row), viewer->entry_stat_p09);
 
     // Histogram
     viewer->histogram_area = gtk_drawing_area_new();
