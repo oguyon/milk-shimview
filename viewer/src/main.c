@@ -110,6 +110,7 @@ typedef struct {
 
     // Stats Widgets
     GtkWidget *vbox_stats;
+    GtkWidget *btn_stats_update;
     GtkWidget *box_stats;
     GtkWidget *entry_stat_min;
     GtkWidget *entry_stat_max;
@@ -1367,7 +1368,8 @@ draw_image (ViewerApp *app)
     app->img_height = height;
 
     // Calculate Stats if selection active
-    if (app->selection_active && gtk_widget_get_visible(app->vbox_stats)) {
+    if (app->selection_active && gtk_widget_get_visible(app->vbox_stats) &&
+        gtk_check_button_get_active(GTK_CHECK_BUTTON(app->btn_stats_update))) {
         calculate_roi_stats(app, raw_data, width, height, datatype);
     }
 
@@ -1833,10 +1835,20 @@ activate (GtkApplication *app,
     gtk_widget_set_visible(viewer->vbox_stats, TRUE); // Start visible
     gtk_box_append(GTK_BOX(hbox_right), viewer->vbox_stats);
 
+    // Stats Header (Update + Hide)
+    GtkWidget *hbox_stats_header = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 5);
+    gtk_box_append(GTK_BOX(viewer->vbox_stats), hbox_stats_header);
+
+    // Update Toggle
+    viewer->btn_stats_update = gtk_check_button_new_with_label("Update");
+    gtk_check_button_set_active(GTK_CHECK_BUTTON(viewer->btn_stats_update), TRUE);
+    gtk_widget_set_hexpand(viewer->btn_stats_update, TRUE);
+    gtk_box_append(GTK_BOX(hbox_stats_header), viewer->btn_stats_update);
+
     // Hide Stats Button (Top of Stats Panel)
     GtkWidget *btn_hide_stats = gtk_button_new_with_label("Hide");
     g_signal_connect(btn_hide_stats, "clicked", G_CALLBACK(on_hide_right_panel_clicked), viewer);
-    gtk_box_append(GTK_BOX(viewer->vbox_stats), btn_hide_stats);
+    gtk_box_append(GTK_BOX(hbox_stats_header), btn_hide_stats);
 
     // Stats Box
     frame_stats = gtk_frame_new("ROI Stats");
