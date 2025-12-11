@@ -137,7 +137,9 @@ typedef struct {
 
     // UI Control
     GtkWidget *vbox_controls;
+    GtkWidget *hbox_right;
     GtkWidget *btn_ctrl_overlay;
+    GtkWidget *btn_stats_overlay;
     GtkWidget *lbl_fps_est;
     struct timespec last_fps_time;
     uint64_t last_fps_cnt;
@@ -312,6 +314,22 @@ on_show_controls_clicked (GtkButton *btn, gpointer user_data)
     ViewerApp *app = (ViewerApp *)user_data;
     gtk_widget_set_visible(app->vbox_controls, TRUE);
     gtk_widget_set_visible(app->btn_ctrl_overlay, FALSE);
+}
+
+static void
+on_hide_right_panel_clicked (GtkButton *btn, gpointer user_data)
+{
+    ViewerApp *app = (ViewerApp *)user_data;
+    gtk_widget_set_visible(app->hbox_right, FALSE);
+    gtk_widget_set_visible(app->btn_stats_overlay, TRUE);
+}
+
+static void
+on_show_right_panel_clicked (GtkButton *btn, gpointer user_data)
+{
+    ViewerApp *app = (ViewerApp *)user_data;
+    gtk_widget_set_visible(app->hbox_right, TRUE);
+    gtk_widget_set_visible(app->btn_stats_overlay, FALSE);
 }
 
 static void
@@ -1777,16 +1795,27 @@ activate (GtkApplication *app,
     gtk_drawing_area_set_draw_func(GTK_DRAWING_AREA(viewer->selection_area), draw_selection_func, viewer, NULL);
     gtk_overlay_add_overlay(GTK_OVERLAY(overlay), viewer->selection_area);
 
+    // Overlay Buttons Container
+    GtkWidget *box_overlay_btns = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 5);
+    gtk_widget_set_halign(box_overlay_btns, GTK_ALIGN_START);
+    gtk_widget_set_valign(box_overlay_btns, GTK_ALIGN_START);
+    gtk_widget_set_margin_start(box_overlay_btns, 5);
+    gtk_widget_set_margin_top(box_overlay_btns, 5);
+    gtk_overlay_add_overlay(GTK_OVERLAY(overlay), box_overlay_btns);
+
     // Ctrl Overlay Button (Hidden by default, shown when panel hidden)
     viewer->btn_ctrl_overlay = gtk_button_new_with_label("ctrl");
-    gtk_widget_set_halign(viewer->btn_ctrl_overlay, GTK_ALIGN_START);
-    gtk_widget_set_valign(viewer->btn_ctrl_overlay, GTK_ALIGN_START);
-    gtk_widget_set_margin_start(viewer->btn_ctrl_overlay, 5);
-    gtk_widget_set_margin_top(viewer->btn_ctrl_overlay, 5);
     gtk_widget_set_opacity(viewer->btn_ctrl_overlay, 0.7);
     g_signal_connect(viewer->btn_ctrl_overlay, "clicked", G_CALLBACK(on_show_controls_clicked), viewer);
     gtk_widget_set_visible(viewer->btn_ctrl_overlay, FALSE);
-    gtk_overlay_add_overlay(GTK_OVERLAY(overlay), viewer->btn_ctrl_overlay);
+    gtk_box_append(GTK_BOX(box_overlay_btns), viewer->btn_ctrl_overlay);
+
+    // Stats Overlay Button (Hidden by default, shown when panel hidden)
+    viewer->btn_stats_overlay = gtk_button_new_with_label("stats");
+    gtk_widget_set_opacity(viewer->btn_stats_overlay, 0.7);
+    g_signal_connect(viewer->btn_stats_overlay, "clicked", G_CALLBACK(on_show_right_panel_clicked), viewer);
+    gtk_widget_set_visible(viewer->btn_stats_overlay, FALSE);
+    gtk_box_append(GTK_BOX(box_overlay_btns), viewer->btn_stats_overlay);
 
     drag_controller = gtk_gesture_drag_new();
     gtk_gesture_single_set_button(GTK_GESTURE_SINGLE(drag_controller), 0);
@@ -1798,6 +1827,7 @@ activate (GtkApplication *app,
 
     // Right Sidebar (Colorbar + Stats)
     hbox_right = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 10);
+    viewer->hbox_right = hbox_right;
     gtk_widget_set_margin_start(hbox_right, 10);
     gtk_widget_set_margin_end(hbox_right, 10);
     gtk_widget_set_margin_top(hbox_right, 10);
@@ -1807,6 +1837,11 @@ activate (GtkApplication *app,
     // Colorbar Column
     GtkWidget *vbox_cbar_col = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
     gtk_box_append(GTK_BOX(hbox_right), vbox_cbar_col);
+
+    // Hide Right Panel Button
+    GtkWidget *btn_hide_right = gtk_button_new_with_label("Hide");
+    g_signal_connect(btn_hide_right, "clicked", G_CALLBACK(on_hide_right_panel_clicked), viewer);
+    gtk_box_append(GTK_BOX(vbox_cbar_col), btn_hide_right);
 
     // Colorbar
     viewer->colorbar = gtk_drawing_area_new ();
