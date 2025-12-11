@@ -109,6 +109,7 @@ typedef struct {
     GtkWidget *lbl_zoom;
 
     // Stats Widgets
+    GtkWidget *vbox_stats;
     GtkWidget *box_stats;
     GtkWidget *entry_stat_min;
     GtkWidget *entry_stat_max;
@@ -116,11 +117,7 @@ typedef struct {
     GtkWidget *entry_stat_median;
     GtkWidget *entry_stat_p01;
     GtkWidget *entry_stat_p09;
-    GtkWidget *entry_stat_sx;
-    GtkWidget *entry_stat_sy;
     GtkWidget *entry_stat_npix;
-    GtkWidget *entry_stat_cx;
-    GtkWidget *entry_stat_cy;
     GtkWidget *entry_stat_sum;
 
     GtkWidget *check_histogram;
@@ -129,7 +126,6 @@ typedef struct {
 
     // ROI Expansion
     GtkWidget *btn_expand_roi;
-    GtkWidget *btn_show_stats;
     GtkWidget *frame_stats;
     GtkWidget *box_images;
     GtkWidget *scrolled_roi;
@@ -320,7 +316,7 @@ static void
 on_hide_right_panel_clicked (GtkButton *btn, gpointer user_data)
 {
     ViewerApp *app = (ViewerApp *)user_data;
-    gtk_widget_set_visible(app->hbox_right, FALSE);
+    gtk_widget_set_visible(app->vbox_stats, FALSE);
     gtk_widget_set_visible(app->btn_stats_overlay, TRUE);
 }
 
@@ -328,8 +324,9 @@ static void
 on_show_right_panel_clicked (GtkButton *btn, gpointer user_data)
 {
     ViewerApp *app = (ViewerApp *)user_data;
-    gtk_widget_set_visible(app->hbox_right, TRUE);
+    gtk_widget_set_visible(app->vbox_stats, TRUE);
     gtk_widget_set_visible(app->btn_stats_overlay, FALSE);
+    app->force_redraw = TRUE;
 }
 
 static void
@@ -479,22 +476,11 @@ on_btn_reset_selection_clicked (GtkButton *btn, gpointer user_data)
         app->selection_active = TRUE;
     }
     app->force_redraw = TRUE;
-    // Keep stats visible if stats toggle is on
-    gboolean show_stats = gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(app->btn_show_stats));
-    if (app->frame_stats) gtk_widget_set_visible(app->frame_stats, show_stats);
 
     gtk_widget_queue_draw(app->selection_area);
     if (app->roi_image_area) gtk_widget_queue_draw(app->roi_image_area);
 }
 
-static void
-on_btn_show_stats_toggled (GtkCheckButton *btn, gpointer user_data)
-{
-    ViewerApp *app = (ViewerApp *)user_data;
-    gboolean active = gtk_check_button_get_active(btn);
-    if (app->frame_stats) gtk_widget_set_visible(app->frame_stats, active);
-    app->force_redraw = TRUE;
-}
 
 static void
 on_btn_expand_roi_toggled (GtkCheckButton *btn, gpointer user_data)
@@ -1339,20 +1325,17 @@ calculate_roi_stats(ViewerApp *app, void *raw_data, int width, int height, uint8
     gtk_editable_set_text(GTK_EDITABLE(app->entry_stat_p09), buf);
 
     // New Stats
-    snprintf(buf, sizeof(buf), "%d", roi_w);
-    gtk_editable_set_text(GTK_EDITABLE(app->entry_stat_sx), buf);
-    snprintf(buf, sizeof(buf), "%d", roi_h);
-    gtk_editable_set_text(GTK_EDITABLE(app->entry_stat_sy), buf);
     snprintf(buf, sizeof(buf), "%zu", count);
     gtk_editable_set_text(GTK_EDITABLE(app->entry_stat_npix), buf);
 
-    snprintf(buf, sizeof(buf), "%.1f", x1 + roi_w/2.0);
-    gtk_editable_set_text(GTK_EDITABLE(app->entry_stat_cx), buf);
-    snprintf(buf, sizeof(buf), "%.1f", y1 + roi_h/2.0);
-    gtk_editable_set_text(GTK_EDITABLE(app->entry_stat_cy), buf);
-
     snprintf(buf, sizeof(buf), "%.4g", sum);
     gtk_editable_set_text(GTK_EDITABLE(app->entry_stat_sum), buf);
+
+    if (app->frame_stats) {
+        snprintf(buf, sizeof(buf), "ROI Stats [ %d x %d at %.1f, %.1f ]",
+                 roi_w, roi_h, x1 + roi_w/2.0, y1 + roi_h/2.0);
+        gtk_frame_set_label(GTK_FRAME(app->frame_stats), buf);
+    }
 }
 
 static void
@@ -1384,7 +1367,7 @@ draw_image (ViewerApp *app)
     app->img_height = height;
 
     // Calculate Stats if selection active
-    if (app->selection_active && gtk_check_button_get_active(GTK_CHECK_BUTTON(app->btn_show_stats))) {
+    if (app->selection_active && gtk_widget_get_visible(app->vbox_stats)) {
         calculate_roi_stats(app, raw_data, width, height, datatype);
     }
 
@@ -1707,11 +1690,6 @@ activate (GtkApplication *app,
     g_signal_connect(viewer->btn_expand_roi, "toggled", G_CALLBACK(on_btn_expand_roi_toggled), viewer);
     gtk_box_append(GTK_BOX(row), viewer->btn_expand_roi);
 
-    viewer->btn_show_stats = gtk_check_button_new_with_label("stats");
-    gtk_check_button_set_active(GTK_CHECK_BUTTON(viewer->btn_show_stats), FALSE);
-    g_signal_connect(viewer->btn_show_stats, "toggled", G_CALLBACK(on_btn_show_stats_toggled), viewer);
-    gtk_box_append(GTK_BOX(row), viewer->btn_show_stats);
-
     btn_reset = gtk_button_new_with_label ("reset");
     g_signal_connect (btn_reset, "clicked", G_CALLBACK (on_btn_reset_selection_clicked), viewer);
     gtk_box_append (GTK_BOX (row), btn_reset);
@@ -1838,11 +1816,6 @@ activate (GtkApplication *app,
     GtkWidget *vbox_cbar_col = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
     gtk_box_append(GTK_BOX(hbox_right), vbox_cbar_col);
 
-    // Hide Right Panel Button
-    GtkWidget *btn_hide_right = gtk_button_new_with_label("Hide");
-    g_signal_connect(btn_hide_right, "clicked", G_CALLBACK(on_hide_right_panel_clicked), viewer);
-    gtk_box_append(GTK_BOX(vbox_cbar_col), btn_hide_right);
-
     // Colorbar
     viewer->colorbar = gtk_drawing_area_new ();
     gtk_widget_set_size_request (viewer->colorbar, 60, -1);
@@ -1855,16 +1828,27 @@ activate (GtkApplication *app,
     g_signal_connect(btn_reset_colorbar, "clicked", G_CALLBACK(on_btn_reset_colorbar_clicked), viewer);
     gtk_box_append(GTK_BOX(vbox_cbar_col), btn_reset_colorbar);
 
+    // Stats Panel Container (Right)
+    viewer->vbox_stats = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
+    gtk_widget_set_visible(viewer->vbox_stats, FALSE); // Start hidden
+    gtk_box_append(GTK_BOX(hbox_right), viewer->vbox_stats);
+
+    // Hide Stats Button (Top of Stats Panel)
+    GtkWidget *btn_hide_stats = gtk_button_new_with_label("Hide");
+    g_signal_connect(btn_hide_stats, "clicked", G_CALLBACK(on_hide_right_panel_clicked), viewer);
+    gtk_box_append(GTK_BOX(viewer->vbox_stats), btn_hide_stats);
+
     // Stats Box
     frame_stats = gtk_frame_new("ROI Stats");
+    viewer->frame_stats = frame_stats;
     viewer->box_stats = gtk_box_new(GTK_ORIENTATION_VERTICAL, 5);
     gtk_widget_set_margin_start(viewer->box_stats, 5);
     gtk_widget_set_margin_end(viewer->box_stats, 5);
     gtk_widget_set_margin_top(viewer->box_stats, 5);
     gtk_widget_set_margin_bottom(viewer->box_stats, 5);
     gtk_frame_set_child(GTK_FRAME(frame_stats), viewer->box_stats);
-    // Add stats frame to right of colorbar
-    gtk_box_append(GTK_BOX(hbox_right), frame_stats);
+
+    gtk_box_append(GTK_BOX(viewer->vbox_stats), frame_stats);
 
     GtkWidget *stat_row;
     GtkWidget *lbl;
@@ -1923,24 +1907,6 @@ activate (GtkApplication *app,
     gtk_widget_set_size_request(viewer->entry_stat_p09, 60, -1);
     gtk_box_append(GTK_BOX(stat_row), viewer->entry_stat_p09);
 
-    // Size
-    stat_row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 5);
-    gtk_box_append(GTK_BOX(viewer->box_stats), stat_row);
-
-    gtk_box_append(GTK_BOX(stat_row), gtk_label_new("S X"));
-    viewer->entry_stat_sx = gtk_entry_new();
-    gtk_editable_set_editable(GTK_EDITABLE(viewer->entry_stat_sx), FALSE);
-    gtk_widget_set_can_focus(viewer->entry_stat_sx, FALSE);
-    gtk_widget_set_size_request(viewer->entry_stat_sx, 60, -1);
-    gtk_box_append(GTK_BOX(stat_row), viewer->entry_stat_sx);
-
-    gtk_box_append(GTK_BOX(stat_row), gtk_label_new("Y"));
-    viewer->entry_stat_sy = gtk_entry_new();
-    gtk_editable_set_editable(GTK_EDITABLE(viewer->entry_stat_sy), FALSE);
-    gtk_widget_set_can_focus(viewer->entry_stat_sy, FALSE);
-    gtk_widget_set_size_request(viewer->entry_stat_sy, 60, -1);
-    gtk_box_append(GTK_BOX(stat_row), viewer->entry_stat_sy);
-
     // Npix / Sum
     stat_row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 5);
     gtk_box_append(GTK_BOX(viewer->box_stats), stat_row);
@@ -1958,24 +1924,6 @@ activate (GtkApplication *app,
     gtk_widget_set_can_focus(viewer->entry_stat_sum, FALSE);
     gtk_widget_set_size_request(viewer->entry_stat_sum, 60, -1);
     gtk_box_append(GTK_BOX(stat_row), viewer->entry_stat_sum);
-
-    // Center
-    stat_row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 5);
-    gtk_box_append(GTK_BOX(viewer->box_stats), stat_row);
-
-    gtk_box_append(GTK_BOX(stat_row), gtk_label_new("C X"));
-    viewer->entry_stat_cx = gtk_entry_new();
-    gtk_editable_set_editable(GTK_EDITABLE(viewer->entry_stat_cx), FALSE);
-    gtk_widget_set_can_focus(viewer->entry_stat_cx, FALSE);
-    gtk_widget_set_size_request(viewer->entry_stat_cx, 60, -1);
-    gtk_box_append(GTK_BOX(stat_row), viewer->entry_stat_cx);
-
-    gtk_box_append(GTK_BOX(stat_row), gtk_label_new("Y"));
-    viewer->entry_stat_cy = gtk_entry_new();
-    gtk_editable_set_editable(GTK_EDITABLE(viewer->entry_stat_cy), FALSE);
-    gtk_widget_set_can_focus(viewer->entry_stat_cy, FALSE);
-    gtk_widget_set_size_request(viewer->entry_stat_cy, 60, -1);
-    gtk_box_append(GTK_BOX(stat_row), viewer->entry_stat_cy);
 
     // Hist Controls (Hist / Log)
     stat_row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 5);
