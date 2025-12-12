@@ -145,6 +145,10 @@ typedef struct {
     gboolean hist_mouse_active;
     double hist_mouse_x;
 
+    // Colorbar Cursor
+    double colorbar_cursor_val;
+    gboolean colorbar_cursor_active;
+
     // Trace UI
     GtkWidget *check_trace;
     GtkWidget *spin_trace_dur;
@@ -372,8 +376,16 @@ update_pixel_info(ViewerApp *app, GtkWidget *label, double x, double y, gboolean
         snprintf(buf, sizeof(buf), "(%d, %d) = %.4g", ix, iy, val);
         gtk_label_set_text(GTK_LABEL(label), buf);
         gtk_widget_set_visible(label, TRUE);
+
+        app->colorbar_cursor_val = val;
+        app->colorbar_cursor_active = TRUE;
+        if (app->colorbar) gtk_widget_queue_draw(app->colorbar);
     } else {
         gtk_widget_set_visible(label, FALSE);
+        if (app->colorbar_cursor_active) {
+             app->colorbar_cursor_active = FALSE;
+             if (app->colorbar) gtk_widget_queue_draw(app->colorbar);
+        }
     }
 }
 
@@ -409,6 +421,9 @@ on_leave (GtkEventControllerMotion *controller,
     } else if (widget == app->roi_image_area) {
         gtk_widget_set_visible(app->lbl_pixel_info_roi, FALSE);
     }
+
+    app->colorbar_cursor_active = FALSE;
+    if (app->colorbar) gtk_widget_queue_draw(app->colorbar);
 }
 
 static void
@@ -899,6 +914,22 @@ draw_colorbar_func (GtkDrawingArea *area,
         // Draw Label
         cairo_move_to(cr, bar_x + bar_width + 8, y + extents.height/2 - 1);
         cairo_show_text(cr, buf);
+    }
+
+    // Draw Cursor Line
+    if (app->colorbar_cursor_active) {
+        double val = app->colorbar_cursor_val;
+        double norm = (val - app->min_val) / (app->max_val - app->min_val);
+
+        if (norm >= 0.0 && norm <= 1.0) {
+            double y = height - margin_bottom - norm * bar_height;
+
+            cairo_set_source_rgb(cr, 1, 0, 1); // Magenta
+            cairo_set_line_width(cr, 2);
+            cairo_move_to(cr, bar_x - 5, y);
+            cairo_line_to(cr, bar_x + bar_width + 5, y);
+            cairo_stroke(cr);
+        }
     }
 }
 
