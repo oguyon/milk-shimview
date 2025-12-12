@@ -1805,8 +1805,7 @@ draw_image (ViewerApp *app)
     app->img_height = height;
 
     // Calculate Stats if selection active
-    if (app->selection_active && gtk_widget_get_visible(app->vbox_stats) &&
-        gtk_check_button_get_active(GTK_CHECK_BUTTON(app->btn_stats_update))) {
+    if (app->selection_active && gtk_check_button_get_active(GTK_CHECK_BUTTON(app->btn_stats_update))) {
         calculate_roi_stats(app, raw_data, width, height, datatype);
     }
 
@@ -2212,6 +2211,18 @@ activate (GtkApplication *app,
     gtk_widget_set_vexpand(viewer->selection_area, TRUE);
     gtk_drawing_area_set_draw_func(GTK_DRAWING_AREA(viewer->selection_area), draw_selection_func, viewer, NULL);
     gtk_overlay_add_overlay(GTK_OVERLAY(overlay), viewer->selection_area);
+
+    viewer->lbl_pixel_info_main = gtk_label_new("");
+    gtk_widget_set_halign(viewer->lbl_pixel_info_main, GTK_ALIGN_END);
+    gtk_widget_set_valign(viewer->lbl_pixel_info_main, GTK_ALIGN_END);
+    gtk_widget_set_margin_end(viewer->lbl_pixel_info_main, 5);
+    gtk_widget_set_margin_bottom(viewer->lbl_pixel_info_main, 5);
+    gtk_overlay_add_overlay(GTK_OVERLAY(overlay), viewer->lbl_pixel_info_main);
+
+    GtkEventController *main_motion = gtk_event_controller_motion_new();
+    g_signal_connect(main_motion, "motion", G_CALLBACK(on_motion_main), viewer);
+    g_signal_connect(main_motion, "leave", G_CALLBACK(on_leave), viewer);
+    gtk_widget_add_controller(viewer->selection_area, main_motion);
 
     // Overlay Buttons Container
     GtkWidget *box_overlay_btns = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 5);
