@@ -2002,11 +2002,6 @@ update_display (gpointer user_data)
         }
     }
 
-    // Update counter label
-    char buf[64];
-    snprintf(buf, sizeof(buf), "Counter: %lu", app->image->md->cnt0);
-    gtk_label_set_text(GTK_LABEL(app->lbl_counter), buf);
-
     // FPS Estimation
     struct timespec now;
     clock_gettime(CLOCK_MONOTONIC, &now);
@@ -2014,8 +2009,9 @@ update_display (gpointer user_data)
     if (dt >= 1.0) {
         double fps = (double)(app->image->md->cnt0 - app->last_fps_cnt) / dt;
         if (fps < 0) fps = 0;
-        snprintf(buf, sizeof(buf), "%.1f Hz", fps);
-        gtk_label_set_text(GTK_LABEL(app->lbl_fps_est), buf);
+        char buf_fps[64];
+        snprintf(buf_fps, sizeof(buf_fps), "%.1f Hz", fps);
+        gtk_label_set_text(GTK_LABEL(app->lbl_fps_est), buf_fps);
         app->last_fps_time = now;
         app->last_fps_cnt = app->image->md->cnt0;
     }
@@ -2032,6 +2028,11 @@ update_display (gpointer user_data)
         if (new_frame) last_cnt0 = app->image->md->cnt0;
         app->force_redraw = FALSE;
         draw_image(app);
+
+        // Update counter label (only when image updates)
+        char buf[64];
+        snprintf(buf, sizeof(buf), "Counter: %lu", last_cnt0);
+        gtk_label_set_text(GTK_LABEL(app->lbl_counter), buf);
     }
 
     return G_SOURCE_CONTINUE;
