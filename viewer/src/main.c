@@ -207,6 +207,8 @@ typedef struct {
     // Colorbar Cursor
     double colorbar_cursor_val;
     gboolean colorbar_cursor_active;
+    gboolean colorbar_mouse_active;
+    double colorbar_mouse_y;
 
     // Trace UI
     GtkWidget *check_trace;
@@ -547,6 +549,27 @@ on_leave_hist (GtkEventControllerMotion *controller,
     app->hist_mouse_active = FALSE;
     gtk_widget_queue_draw(app->histogram_area);
     app->force_redraw = TRUE; // Trigger image redraw to remove tint
+}
+
+static void
+on_motion_colorbar (GtkEventControllerMotion *controller,
+                    double                    x,
+                    double                    y,
+                    gpointer                  user_data)
+{
+    ViewerApp *app = (ViewerApp *)user_data;
+    app->colorbar_mouse_active = TRUE;
+    app->colorbar_mouse_y = y;
+    gtk_widget_queue_draw(app->colorbar);
+}
+
+static void
+on_leave_colorbar (GtkEventControllerMotion *controller,
+                   gpointer                  user_data)
+{
+    ViewerApp *app = (ViewerApp *)user_data;
+    app->colorbar_mouse_active = FALSE;
+    gtk_widget_queue_draw(app->colorbar);
 }
 
 static void
@@ -1011,25 +1034,46 @@ draw_colorbar_func (GtkDrawingArea *area,
 
     if (bar_height <= 0) return;
 
-    // Draw Gradient respecting cmap_min/cmap_max
-    // We iterate pixels vertically and calculate color
+    // Draw Gradient or Red/Blue Override
+    if (app->colorbar_mouse_active) {
+        // Red above mouse, Blue below
+        // mouse_y is relative to widget. Bar starts at margin_top, ends at height - margin_bottom.
 
-    for (int y = 0; y < bar_height; y++) {
-        double t = 1.0 - (double)y / (double)bar_height; // 0 at bottom, 1 at top
+        double split_y = app->colorbar_mouse_y;
 
-        // Apply mapping
-        double val = (t - app->cmap_min) / (app->cmap_max - app->cmap_min);
-        if (val < 0) val = 0;
-        if (val > 1) val = 1;
+        // Clamp split to bar area
+        if (split_y < margin_top) split_y = margin_top;
+        if (split_y > height - margin_bottom) split_y = height - margin_bottom;
 
-        val = apply_scaling(val, app->scale_type);
-
-        double r, g, b;
-        get_colormap_color(val, app->colormap_type, &r, &g, &b);
-
-        cairo_set_source_rgb(cr, r, g, b);
-        cairo_rectangle(cr, bar_x, margin_top + y, bar_width, 1);
+        // Red Top
+        cairo_set_source_rgb(cr, 1, 0, 0); // Red
+        cairo_rectangle(cr, bar_x, margin_top, bar_width, split_y - margin_top);
         cairo_fill(cr);
+
+        // Blue Bottom
+        cairo_set_source_rgb(cr, 0, 0, 1); // Blue
+        cairo_rectangle(cr, bar_x, split_y, bar_width, (height - margin_bottom) - split_y);
+        cairo_fill(cr);
+
+    } else {
+        // Normal Gradient
+        for (int y = 0; y < bar_height; y++) {
+            double t = 1.0 - (double)y / (double)bar_height; // 0 at bottom, 1 at top
+
+            // Apply mapping
+            double val = (t - app->cmap_min) / (app->cmap_max - app->cmap_min);
+            if (val < 0) val = 0;
+            if (val > 1) val = 1;
+
+            val = apply_scaling(val, app->scale_type);
+
+            double r, g, b;
+            get_colormap_color(val, app->colormap_type, &r, &g, &b);
+
+            cairo_set_source_rgb(cr, r, g, b);
+            cairo_rectangle(cr, bar_x, margin_top + y, bar_width, 1);
+            cairo_fill(cr);
+        }
     }
 
     // Draw Border
@@ -1064,8 +1108,8 @@ draw_colorbar_func (GtkDrawingArea *area,
         cairo_show_text(cr, buf);
     }
 
-    // Draw Cursor Line
-    if (app->colorbar_cursor_active) {
+    // Draw Cursor Line (from image hover)
+    if (app->colorbar_cursor_active && !app->colorbar_mouse_active) {
         double val = app->colorbar_cursor_val;
         double norm = (val - app->min_val) / (app->max_val - app->min_val);
 
@@ -1078,6 +1122,43 @@ draw_colorbar_func (GtkDrawingArea *area,
             cairo_line_to(cr, bar_x + bar_width + 5, y);
             cairo_stroke(cr);
         }
+    }
+
+    // Draw Mouse Interaction (Yellow Line + Text)
+    if (app->colorbar_mouse_active) {
+        double split_y = app->colorbar_mouse_y;
+        if (split_y < margin_top) split_y = margin_top;
+        if (split_y > height - margin_bottom) split_y = height - margin_bottom;
+
+        // Yellow Line
+        cairo_set_source_rgb(cr, 1, 1, 0); // Yellow
+        cairo_set_line_width(cr, 2);
+        cairo_move_to(cr, bar_x - 5, split_y);
+        cairo_line_to(cr, bar_x + bar_width + 5, split_y);
+        cairo_stroke(cr);
+
+        // Calculate Value
+        double t = 1.0 - (split_y - margin_top) / (double)bar_height; // 0 at bottom, 1 at top
+        double val = app->min_val + t * (app->max_val - app->min_val);
+
+        // Text Box
+        char buf[64];
+        snprintf(buf, sizeof(buf), "%.4g", val);
+        cairo_text_extents(cr, buf, &extents);
+
+        double text_w = extents.width + 10;
+        double text_h = extents.height + 6;
+        double text_x = bar_x - text_w - 5; // Left of bar
+        if (text_x < 0) text_x = bar_x + bar_width + 5; // Right if no space
+        double text_y = split_y - text_h / 2;
+
+        cairo_set_source_rgba(cr, 0, 0, 0, 0.7);
+        cairo_rectangle(cr, text_x, text_y, text_w, text_h);
+        cairo_fill(cr);
+
+        cairo_set_source_rgb(cr, 1, 1, 1);
+        cairo_move_to(cr, text_x + 5, text_y + text_h - 4);
+        cairo_show_text(cr, buf);
     }
 }
 
@@ -1786,18 +1867,21 @@ drag_begin (GtkGestureDrag *gesture,
     guint button = gtk_gesture_single_get_current_button(GTK_GESTURE_SINGLE(gesture));
 
     if (button == GDK_BUTTON_SECONDARY) { // Right Click
+        app->is_adjusting_contrast = TRUE;
+        app->contrast_start_x = x;
+        app->contrast_start_y = y;
+        app->contrast_start_cmap_min = app->cmap_min;
+        app->contrast_start_cmap_max = app->cmap_max;
+        return;
+    }
+
+    if (button == GDK_BUTTON_PRIMARY) { // Left Click
         GtkEventController *controller = GTK_EVENT_CONTROLLER(gesture);
         GdkEvent *event = gtk_event_controller_get_current_event(controller);
         GdkModifierType modifiers = gdk_event_get_modifier_state(event);
 
-        if (modifiers & GDK_CONTROL_MASK) {
-             // Contrast Adjustment
-            app->is_adjusting_contrast = TRUE;
-            app->contrast_start_x = x;
-            app->contrast_start_y = y;
-            app->contrast_start_cmap_min = app->cmap_min;
-            app->contrast_start_cmap_max = app->cmap_max;
-        } else {
+        // If Shift is NOT pressed, check for Pan
+        if (!(modifiers & GDK_SHIFT_MASK)) {
             // Pan
             GtkAdjustment *hadj = gtk_scrolled_window_get_hadjustment(GTK_SCROLLED_WINDOW(app->scrolled_main));
             GtkAdjustment *vadj = gtk_scrolled_window_get_vadjustment(GTK_SCROLLED_WINDOW(app->scrolled_main));
@@ -1812,16 +1896,9 @@ drag_begin (GtkGestureDrag *gesture,
                 app->pan_start_hadj = gtk_adjustment_get_value(hadj);
                 app->pan_start_vadj = gtk_adjustment_get_value(vadj);
             }
+            return;
         }
-        return;
-    }
 
-    if (button == GDK_BUTTON_PRIMARY) { // Left Click
-        GtkEventController *controller = GTK_EVENT_CONTROLLER(gesture);
-        GdkEvent *event = gtk_event_controller_get_current_event(controller);
-        GdkModifierType modifiers = gdk_event_get_modifier_state(event);
-
-        if (!(modifiers & GDK_SHIFT_MASK)) return;
         if (!app->image) return;
 
         int ix, iy;
@@ -2789,6 +2866,12 @@ activate (GtkApplication *app,
     gtk_widget_set_size_request (viewer->colorbar, 60, -1);
     gtk_widget_set_vexpand(viewer->colorbar, TRUE);
     gtk_drawing_area_set_draw_func (GTK_DRAWING_AREA (viewer->colorbar), draw_colorbar_func, viewer, NULL);
+
+    GtkEventController *cbar_motion = gtk_event_controller_motion_new();
+    g_signal_connect(cbar_motion, "motion", G_CALLBACK(on_motion_colorbar), viewer);
+    g_signal_connect(cbar_motion, "leave", G_CALLBACK(on_leave_colorbar), viewer);
+    gtk_widget_add_controller(viewer->colorbar, cbar_motion);
+
     gtk_box_append (GTK_BOX (vbox_cbar_col), viewer->colorbar);
 
     // Reset Colorbar Small Button
