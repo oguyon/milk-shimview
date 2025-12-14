@@ -831,6 +831,8 @@ on_btn_autoscale_toggled (GtkToggleButton *btn, gpointer user_data)
     ViewerApp *app = (ViewerApp *)user_data;
     gboolean active = gtk_toggle_button_get_active(btn);
 
+    gtk_button_set_label(GTK_BUTTON(btn), active ? "Auto" : "Manual");
+
     if (active) {
         // Switch to Auto
         // Restore last modes if valid (not manual), else default to DATA
@@ -3106,7 +3108,7 @@ activate (GtkApplication *app,
     row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 5);
     gtk_box_append(GTK_BOX(viewer->vbox_controls), row);
 
-    btn_autoscale = gtk_toggle_button_new_with_label ("Auto Scale");
+    btn_autoscale = gtk_toggle_button_new_with_label ("Auto");
     viewer->btn_autoscale = btn_autoscale;
     g_signal_connect (btn_autoscale, "toggled", G_CALLBACK (on_btn_autoscale_toggled), viewer);
     gtk_widget_set_hexpand(btn_autoscale, TRUE);
@@ -3114,8 +3116,8 @@ activate (GtkApplication *app,
 
     // Add CSS for Auto Scale button (Red when active)
     GtkCssProvider *provider = gtk_css_provider_new();
-    gtk_css_provider_load_from_data(provider,
-        "togglebutton:checked { background: #aa0000; color: white; border-color: #550000; }", -1);
+    gtk_css_provider_load_from_string(provider,
+        "togglebutton:checked { background: #aa0000; color: white; border-color: #550000; }");
     GtkStyleContext *context = gtk_widget_get_style_context(btn_autoscale);
     gtk_style_context_add_provider(context, GTK_STYLE_PROVIDER(provider), GTK_STYLE_PROVIDER_PRIORITY_USER);
 
@@ -3669,6 +3671,9 @@ main (int    argc,
 
     viewer.trace_duration = 60.0; // Default 60s
     clock_gettime(CLOCK_MONOTONIC, &viewer.program_start_time);
+
+    viewer.last_min_mode = AUTO_DATA;
+    viewer.last_max_mode = AUTO_MAX_DATA;
 
     app = gtk_application_new ("org.milk.shmimview", G_APPLICATION_NON_UNIQUE);
     g_signal_connect (app, "activate", G_CALLBACK (activate), &viewer);
