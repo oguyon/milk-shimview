@@ -260,6 +260,11 @@ typedef struct {
     int rot_angle; // 0, 90, 180, 270 (CCW steps: 0,1,2,3)
     gboolean flip_x;
     gboolean flip_y;
+    GtkWidget *lbl_rotation;
+
+    // Auto Scale Gain
+    double auto_gain;
+    GtkWidget *dropdown_gain;
 } ViewerApp;
 
 // Command line option variables
@@ -300,17 +305,25 @@ static GOptionEntry entries[] =
 
 // Forward decl
 static void update_zoom_layout(ViewerApp *app);
-static void get_image_screen_geometry(ViewerApp *app, double *offset_x, double *offset_y, double *scale);
+static void get_image_screen_geometry(ViewerApp *app, int widget_w, int widget_h, double *center_x, double *center_y, double *scale);
 static void widget_to_image_coords(ViewerApp *app, double wx, double wy, int *ix, int *iy);
 gboolean update_display (gpointer user_data);
 static void on_btn_autoscale_toggled (GtkToggleButton *btn, gpointer user_data);
 
 // Helpers for Orientation
+static void update_rotation_label(ViewerApp *app) {
+    char buf[16];
+    int angle = (app->rot_angle * 90) % 360;
+    snprintf(buf, sizeof(buf), "%d deg", angle);
+    gtk_label_set_text(GTK_LABEL(app->lbl_rotation), buf);
+}
+
 static void
 on_rotate_cw_clicked (GtkButton *btn, gpointer user_data)
 {
     ViewerApp *app = (ViewerApp *)user_data;
     app->rot_angle = (app->rot_angle + 3) % 4; // -90 deg
+    update_rotation_label(app);
     app->force_redraw = TRUE;
 }
 
@@ -319,23 +332,35 @@ on_rotate_ccw_clicked (GtkButton *btn, gpointer user_data)
 {
     ViewerApp *app = (ViewerApp *)user_data;
     app->rot_angle = (app->rot_angle + 1) % 4; // +90 deg
+    update_rotation_label(app);
     app->force_redraw = TRUE;
 }
 
 static void
-on_flip_x_clicked (GtkButton *btn, gpointer user_data)
+on_flip_x_toggled (GtkToggleButton *btn, gpointer user_data)
 {
     ViewerApp *app = (ViewerApp *)user_data;
-    app->flip_x = !app->flip_x;
+    app->flip_x = gtk_toggle_button_get_active(btn);
     app->force_redraw = TRUE;
 }
 
 static void
-on_flip_y_clicked (GtkButton *btn, gpointer user_data)
+on_flip_y_toggled (GtkToggleButton *btn, gpointer user_data)
 {
     ViewerApp *app = (ViewerApp *)user_data;
-    app->flip_y = !app->flip_y;
+    app->flip_y = gtk_toggle_button_get_active(btn);
     app->force_redraw = TRUE;
+}
+
+static void
+on_gain_changed (GtkDropDown *dropdown, GParamSpec *pspec, gpointer user_data)
+{
+    ViewerApp *app = (ViewerApp *)user_data;
+    guint selected = gtk_drop_down_get_selected(dropdown);
+    double gains[] = {1.00, 0.50, 0.20, 0.10, 0.05, 0.02, 0.01};
+    if (selected < 7) {
+        app->auto_gain = gains[selected];
+    }
 }
 
 // Helper Functions for Color & Scale
@@ -1063,7 +1088,9 @@ on_scroll (GtkEventControllerScroll *controller,
 
     if (app->fit_window) {
         double off_x, off_y, scale;
-        get_image_screen_geometry(app, &off_x, &off_y, &scale);
+        int w = gtk_widget_get_width(app->image_area);
+        int h = gtk_widget_get_height(app->image_area);
+        get_image_screen_geometry(app, w, h, &off_x, &off_y, &scale);
         app->zoom_factor = scale;
         if (dy > 0) app->zoom_factor /= zoom_step;
         else if (dy < 0) app->zoom_factor *= zoom_step;
@@ -1080,14 +1107,11 @@ on_scroll (GtkEventControllerScroll *controller,
 
 // Helpers for coordinate conversion
 static void
-get_image_screen_geometry(ViewerApp *app, double *center_x, double *center_y, double *scale) {
+get_image_screen_geometry(ViewerApp *app, int widget_w, int widget_h, double *center_x, double *center_y, double *scale) {
     if (!app->image) {
         *center_x = 0; *center_y = 0; *scale = 1.0;
         return;
     }
-
-    int widget_w = gtk_widget_get_width(app->image_area);
-    int widget_h = gtk_widget_get_height(app->image_area);
 
     if (widget_w <= 0 || widget_h <= 0) {
         *center_x = 0; *center_y = 0; *scale = 1.0;
@@ -1114,25 +1138,8 @@ get_image_screen_geometry(ViewerApp *app, double *center_x, double *center_y, do
         *scale = app->zoom_factor;
     }
 
-    // We use center of widget as reference for drawing
-    // However, if zoomed in (not fitting), standard behavior is to center the image if smaller than widget,
-    // or align top-left if larger? The original code centered it.
-    // For transformations, it is easiest to keep the image centered in the view or scrolling area.
-    // The ScrolledWindow handles scrolling if the widget size is larger.
-
-    // The previous implementation calculated offset for top-left.
-    // Here we will calculate center position relative to widget.
-    // If widget is larger than image, center is widget center.
-    // If widget is smaller, we still draw centered on the drawing area, but the drawing area size is set by update_zoom_layout.
-
     *center_x = widget_w / 2.0;
     *center_y = widget_h / 2.0;
-
-    // Correction for gtk_widget_compute_point if selection area is different coord system?
-    // The selection area is overlay on top of scrolled window, image area is child of overlay.
-    // Actually both are in overlay.
-    // We need coordinates relative to the widget being drawn (image_area or selection_area).
-    // They should be same size/pos if setup correctly.
 }
 
 static void
@@ -1156,8 +1163,10 @@ update_zoom_layout(ViewerApp *app) {
         gtk_widget_set_hexpand(app->image_area, TRUE);
         gtk_widget_set_vexpand(app->image_area, TRUE);
 
+        int w = gtk_widget_get_width(app->image_area);
+        int h = gtk_widget_get_height(app->image_area);
         double cx, cy, scale;
-        get_image_screen_geometry(app, &cx, &cy, &scale);
+        get_image_screen_geometry(app, w, h, &cx, &cy, &scale);
         snprintf(buf, sizeof(buf), "Zoom: %.1f%%", scale * 100.0);
         gtk_label_set_text(GTK_LABEL(app->lbl_zoom), buf);
 
@@ -2187,7 +2196,7 @@ draw_image_area_func (GtkDrawingArea *area,
     );
 
     double cx, cy, scale;
-    get_image_screen_geometry(app, &cx, &cy, &scale);
+    get_image_screen_geometry(app, width, height, &cx, &cy, &scale);
 
     cairo_save(cr);
 
@@ -2208,7 +2217,9 @@ draw_image_area_func (GtkDrawingArea *area,
 static void
 widget_to_image_coords(ViewerApp *app, double wx, double wy, int *ix, int *iy) {
     double cx, cy, scale;
-    get_image_screen_geometry(app, &cx, &cy, &scale);
+    int w = gtk_widget_get_width(app->image_area);
+    int h = gtk_widget_get_height(app->image_area);
+    get_image_screen_geometry(app, w, h, &cx, &cy, &scale);
 
     // Inverse Transform
     double x = wx - cx;
@@ -2253,7 +2264,7 @@ draw_selection_func (GtkDrawingArea *area,
     ViewerApp *app = (ViewerApp *)user_data;
 
     double cx, cy, scale;
-    get_image_screen_geometry(app, &cx, &cy, &scale);
+    get_image_screen_geometry(app, width, height, &cx, &cy, &scale);
 
     // Draw Orientation Overlay
     cairo_save(cr);
@@ -2454,7 +2465,9 @@ drag_update (GtkGestureDrag *gesture,
 
     if (app->is_moving_selection) {
         double off_x, off_y, scale;
-        get_image_screen_geometry(app, &off_x, &off_y, &scale);
+        int width = gtk_widget_get_width(app->selection_area);
+        int height = gtk_widget_get_height(app->selection_area);
+        get_image_screen_geometry(app, width, height, &off_x, &off_y, &scale);
 
         // Transform offset vector to image space (inverse rotate & flip)
         double dx = offset_x / scale;
@@ -2711,6 +2724,16 @@ calculate_autoscale_limits(ViewerApp *app, double *new_min, double *new_max, int
 
     // Fallback to Full Frame
     calculate_limits_from_buffer(raw_data, (size_t)width * height, datatype, mode_min, mode_max, new_min, new_max);
+
+    // Apply Gain (Smoothing) if in Auto Mode
+    // formula: val = gain * new + (1-gain) * old
+    // Gain 1.0 = Instant, Gain 0.01 = Slow
+    if (mode_min != AUTO_MANUAL) {
+        *new_min = app->auto_gain * (*new_min) + (1.0 - app->auto_gain) * app->min_val;
+    }
+    if (mode_max != AUTO_MAX_MANUAL) {
+        *new_max = app->auto_gain * (*new_max) + (1.0 - app->auto_gain) * app->max_val;
+    }
 }
 
 static void
@@ -3072,6 +3095,9 @@ update_display (gpointer user_data)
         char buf[64];
         snprintf(buf, sizeof(buf), "Counter: %lu", last_cnt0);
         gtk_label_set_text(GTK_LABEL(app->lbl_counter), buf);
+
+        // Force redraw of selection overlay to update frame counter if control panel is hidden
+        if (app->selection_area) gtk_widget_queue_draw(app->selection_area);
     }
 
     return G_SOURCE_CONTINUE;
@@ -3192,6 +3218,33 @@ activate (GtkApplication *app,
     viewer->lbl_zoom = gtk_label_new ("100%");
     gtk_box_append (GTK_BOX (row), viewer->lbl_zoom);
 
+    // Orientation Controls
+    row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 5);
+    gtk_box_append(GTK_BOX(viewer->vbox_controls), row);
+
+    GtkWidget *btn_rot_cw = gtk_button_new_with_label("-90");
+    g_signal_connect(btn_rot_cw, "clicked", G_CALLBACK(on_rotate_cw_clicked), viewer);
+    gtk_box_append(GTK_BOX(row), btn_rot_cw);
+
+    GtkWidget *btn_rot_ccw = gtk_button_new_with_label("+90");
+    g_signal_connect(btn_rot_ccw, "clicked", G_CALLBACK(on_rotate_ccw_clicked), viewer);
+    gtk_box_append(GTK_BOX(row), btn_rot_ccw);
+
+    viewer->lbl_rotation = gtk_label_new("0 deg");
+    gtk_box_append(GTK_BOX(row), viewer->lbl_rotation);
+
+    GtkWidget *btn_flip_x = gtk_toggle_button_new_with_label("FlipX");
+    gtk_widget_add_css_class(btn_flip_x, "auto-scale-red"); // Reuse red style
+    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(btn_flip_x), viewer->flip_x);
+    g_signal_connect(btn_flip_x, "toggled", G_CALLBACK(on_flip_x_toggled), viewer);
+    gtk_box_append(GTK_BOX(row), btn_flip_x);
+
+    GtkWidget *btn_flip_y = gtk_toggle_button_new_with_label("FlipY");
+    gtk_widget_add_css_class(btn_flip_y, "auto-scale-red");
+    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(btn_flip_y), viewer->flip_y);
+    g_signal_connect(btn_flip_y, "toggled", G_CALLBACK(on_flip_y_toggled), viewer);
+    gtk_box_append(GTK_BOX(row), btn_flip_y);
+
     // Selection Controls
     row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 5);
     gtk_box_append(GTK_BOX(viewer->vbox_controls), row);
@@ -3230,31 +3283,18 @@ activate (GtkApplication *app,
                                                GTK_STYLE_PROVIDER(provider),
                                                GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
 
+    // Auto Scale Gain Dropdown
+    const char *gain_opts[] = {"1.00", "0.50", "0.20", "0.10", "0.05", "0.02", "0.01", NULL};
+    viewer->dropdown_gain = gtk_drop_down_new_from_strings(gain_opts);
+    gtk_drop_down_set_selected(GTK_DROP_DOWN(viewer->dropdown_gain), 0); // Default 1.00
+    g_signal_connect(viewer->dropdown_gain, "notify::selected", G_CALLBACK(on_gain_changed), viewer);
+    gtk_box_append(GTK_BOX(row), viewer->dropdown_gain);
+
     // Auto Scale Source Toggle
     GtkWidget *btn_as_source = gtk_toggle_button_new_with_label("Full");
     viewer->btn_autoscale_source = btn_as_source;
     g_signal_connect(btn_as_source, "toggled", G_CALLBACK(on_btn_autoscale_source_toggled), viewer);
     gtk_box_append(GTK_BOX(row), btn_as_source);
-
-    // Orientation Controls
-    row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 5);
-    gtk_box_append(GTK_BOX(viewer->vbox_controls), row);
-
-    GtkWidget *btn_rot_cw = gtk_button_new_with_label("-90");
-    g_signal_connect(btn_rot_cw, "clicked", G_CALLBACK(on_rotate_cw_clicked), viewer);
-    gtk_box_append(GTK_BOX(row), btn_rot_cw);
-
-    GtkWidget *btn_rot_ccw = gtk_button_new_with_label("+90");
-    g_signal_connect(btn_rot_ccw, "clicked", G_CALLBACK(on_rotate_ccw_clicked), viewer);
-    gtk_box_append(GTK_BOX(row), btn_rot_ccw);
-
-    GtkWidget *btn_flip_x = gtk_button_new_with_label("FlipX");
-    g_signal_connect(btn_flip_x, "clicked", G_CALLBACK(on_flip_x_clicked), viewer);
-    gtk_box_append(GTK_BOX(row), btn_flip_x);
-
-    GtkWidget *btn_flip_y = gtk_button_new_with_label("FlipY");
-    g_signal_connect(btn_flip_y, "clicked", G_CALLBACK(on_flip_y_clicked), viewer);
-    gtk_box_append(GTK_BOX(row), btn_flip_y);
 
     // Min Control
     row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 5);
@@ -3799,6 +3839,7 @@ main (int    argc,
     viewer.trace_hist_max = (double*)calloc(TRACE_MAX_SAMPLES, sizeof(double));
 
     viewer.trace_duration = 10.0; // Default 10s
+    viewer.auto_gain = 1.0;
     clock_gettime(CLOCK_MONOTONIC, &viewer.program_start_time);
 
     viewer.last_min_mode = AUTO_DATA;
