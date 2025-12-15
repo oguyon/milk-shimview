@@ -3791,7 +3791,9 @@ activate (GtkApplication *app,
     g_signal_connect(btn_dec, "clicked", G_CALLBACK(on_trace_dur_decrease), viewer);
     gtk_box_append(GTK_BOX(stat_row), btn_dec);
 
-    viewer->lbl_trace_dur = gtk_label_new("60.0s");
+    char buf_dur[32];
+    snprintf(buf_dur, sizeof(buf_dur), "%.1fs", viewer->trace_duration);
+    viewer->lbl_trace_dur = gtk_label_new(buf_dur);
     gtk_box_append(GTK_BOX(stat_row), viewer->lbl_trace_dur);
 
     GtkWidget *btn_inc = gtk_button_new_with_label("+");
