@@ -1954,8 +1954,6 @@ on_threshold_toggled (GtkCheckButton *btn, gpointer user_data)
 {
     ViewerApp *app = (ViewerApp *)user_data;
     app->thresholds_enabled = gtk_check_button_get_active(btn);
-    gtk_widget_set_sensitive(app->spin_thresh_min, app->thresholds_enabled);
-    gtk_widget_set_sensitive(app->spin_thresh_max, app->thresholds_enabled);
     app->force_redraw = TRUE;
 }
 
@@ -3186,7 +3184,6 @@ activate (GtkApplication *app,
     viewer->spin_thresh_min = gtk_spin_button_new_with_range(-1e20, 1e20, 1.0);
     gtk_spin_button_set_digits(GTK_SPIN_BUTTON(viewer->spin_thresh_min), 2);
     gtk_widget_set_hexpand(viewer->spin_thresh_min, TRUE);
-    gtk_widget_set_sensitive(viewer->spin_thresh_min, FALSE);
     gtk_spin_button_set_value(GTK_SPIN_BUTTON(viewer->spin_thresh_min), 0.0);
     g_signal_connect(viewer->spin_thresh_min, "value-changed", G_CALLBACK(on_thresh_min_changed), viewer);
     gtk_box_append(GTK_BOX(row), viewer->spin_thresh_min);
@@ -3199,7 +3196,6 @@ activate (GtkApplication *app,
     viewer->spin_thresh_max = gtk_spin_button_new_with_range(-1e20, 1e20, 1.0);
     gtk_spin_button_set_digits(GTK_SPIN_BUTTON(viewer->spin_thresh_max), 2);
     gtk_widget_set_hexpand(viewer->spin_thresh_max, TRUE);
-    gtk_widget_set_sensitive(viewer->spin_thresh_max, FALSE);
     gtk_spin_button_set_value(GTK_SPIN_BUTTON(viewer->spin_thresh_max), 1.0);
     g_signal_connect(viewer->spin_thresh_max, "value-changed", G_CALLBACK(on_thresh_max_changed), viewer);
     gtk_box_append(GTK_BOX(row), viewer->spin_thresh_max);
