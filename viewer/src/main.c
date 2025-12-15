@@ -255,6 +255,11 @@ typedef struct {
     gboolean mouse_over_main;
     double last_mouse_x_main;
     double last_mouse_y_main;
+
+    // Orientation
+    int rot_angle; // 0, 90, 180, 270 (CCW steps: 0,1,2,3)
+    gboolean flip_x;
+    gboolean flip_y;
 } ViewerApp;
 
 // Command line option variables
@@ -299,6 +304,39 @@ static void get_image_screen_geometry(ViewerApp *app, double *offset_x, double *
 static void widget_to_image_coords(ViewerApp *app, double wx, double wy, int *ix, int *iy);
 gboolean update_display (gpointer user_data);
 static void on_btn_autoscale_toggled (GtkToggleButton *btn, gpointer user_data);
+
+// Helpers for Orientation
+static void
+on_rotate_cw_clicked (GtkButton *btn, gpointer user_data)
+{
+    ViewerApp *app = (ViewerApp *)user_data;
+    app->rot_angle = (app->rot_angle + 3) % 4; // -90 deg
+    app->force_redraw = TRUE;
+}
+
+static void
+on_rotate_ccw_clicked (GtkButton *btn, gpointer user_data)
+{
+    ViewerApp *app = (ViewerApp *)user_data;
+    app->rot_angle = (app->rot_angle + 1) % 4; // +90 deg
+    app->force_redraw = TRUE;
+}
+
+static void
+on_flip_x_clicked (GtkButton *btn, gpointer user_data)
+{
+    ViewerApp *app = (ViewerApp *)user_data;
+    app->flip_x = !app->flip_x;
+    app->force_redraw = TRUE;
+}
+
+static void
+on_flip_y_clicked (GtkButton *btn, gpointer user_data)
+{
+    ViewerApp *app = (ViewerApp *)user_data;
+    app->flip_y = !app->flip_y;
+    app->force_redraw = TRUE;
+}
 
 // Helper Functions for Color & Scale
 
@@ -1042,9 +1080,9 @@ on_scroll (GtkEventControllerScroll *controller,
 
 // Helpers for coordinate conversion
 static void
-get_image_screen_geometry(ViewerApp *app, double *offset_x, double *offset_y, double *scale) {
+get_image_screen_geometry(ViewerApp *app, double *center_x, double *center_y, double *scale) {
     if (!app->image) {
-        *offset_x = 0; *offset_y = 0; *scale = 1.0;
+        *center_x = 0; *center_y = 0; *scale = 1.0;
         return;
     }
 
@@ -1052,7 +1090,7 @@ get_image_screen_geometry(ViewerApp *app, double *offset_x, double *offset_y, do
     int widget_h = gtk_widget_get_height(app->image_area);
 
     if (widget_w <= 0 || widget_h <= 0) {
-        *offset_x = 0; *offset_y = 0; *scale = 1.0;
+        *center_x = 0; *center_y = 0; *scale = 1.0;
         return;
     }
 
@@ -1060,49 +1098,41 @@ get_image_screen_geometry(ViewerApp *app, double *offset_x, double *offset_y, do
     double img_h = (double)app->image->md->size[1];
 
     if (img_w <= 0 || img_h <= 0) {
-        *offset_x = 0; *offset_y = 0; *scale = 1.0;
+        *center_x = 0; *center_y = 0; *scale = 1.0;
         return;
     }
 
-    double int_off_x, int_off_y;
+    // Effective dimensions after rotation
+    double eff_w = (app->rot_angle % 2 == 0) ? img_w : img_h;
+    double eff_h = (app->rot_angle % 2 == 0) ? img_h : img_w;
 
     if (app->fit_window) {
-        double scale_x = (double)widget_w / img_w;
-        double scale_y = (double)widget_h / img_h;
+        double scale_x = (double)widget_w / eff_w;
+        double scale_y = (double)widget_h / eff_h;
         *scale = (scale_x < scale_y) ? scale_x : scale_y;
-
-        double display_w = img_w * (*scale);
-        double display_h = img_h * (*scale);
-
-        int_off_x = (widget_w - display_w) / 2.0;
-        int_off_y = (widget_h - display_h) / 2.0;
     } else {
         *scale = app->zoom_factor;
-
-        double display_w = img_w * (*scale);
-        double display_h = img_h * (*scale);
-
-        if (widget_w > display_w) int_off_x = (widget_w - display_w) / 2.0;
-        else int_off_x = 0;
-
-        if (widget_h > display_h) int_off_y = (widget_h - display_h) / 2.0;
-        else int_off_y = 0;
     }
 
-    if (app->selection_area) {
-        graphene_point_t p_in = {0, 0};
-        graphene_point_t p_out;
-        if (gtk_widget_compute_point(app->image_area, app->selection_area, &p_in, &p_out)) {
-            *offset_x = int_off_x + p_out.x;
-            *offset_y = int_off_y + p_out.y;
-        } else {
-            *offset_x = int_off_x;
-            *offset_y = int_off_y;
-        }
-    } else {
-        *offset_x = int_off_x;
-        *offset_y = int_off_y;
-    }
+    // We use center of widget as reference for drawing
+    // However, if zoomed in (not fitting), standard behavior is to center the image if smaller than widget,
+    // or align top-left if larger? The original code centered it.
+    // For transformations, it is easiest to keep the image centered in the view or scrolling area.
+    // The ScrolledWindow handles scrolling if the widget size is larger.
+
+    // The previous implementation calculated offset for top-left.
+    // Here we will calculate center position relative to widget.
+    // If widget is larger than image, center is widget center.
+    // If widget is smaller, we still draw centered on the drawing area, but the drawing area size is set by update_zoom_layout.
+
+    *center_x = widget_w / 2.0;
+    *center_y = widget_h / 2.0;
+
+    // Correction for gtk_widget_compute_point if selection area is different coord system?
+    // The selection area is overlay on top of scrolled window, image area is child of overlay.
+    // Actually both are in overlay.
+    // We need coordinates relative to the widget being drawn (image_area or selection_area).
+    // They should be same size/pos if setup correctly.
 }
 
 static void
@@ -1111,6 +1141,10 @@ update_zoom_layout(ViewerApp *app) {
 
     double img_w = (double)app->image->md->size[0];
     double img_h = (double)app->image->md->size[1];
+
+    // Effective dimensions
+    double eff_w = (app->rot_angle % 2 == 0) ? img_w : img_h;
+    double eff_h = (app->rot_angle % 2 == 0) ? img_h : img_w;
 
     char buf[64];
 
@@ -1122,16 +1156,16 @@ update_zoom_layout(ViewerApp *app) {
         gtk_widget_set_hexpand(app->image_area, TRUE);
         gtk_widget_set_vexpand(app->image_area, TRUE);
 
-        double off_x, off_y, scale;
-        get_image_screen_geometry(app, &off_x, &off_y, &scale);
+        double cx, cy, scale;
+        get_image_screen_geometry(app, &cx, &cy, &scale);
         snprintf(buf, sizeof(buf), "Zoom: %.1f%%", scale * 100.0);
         gtk_label_set_text(GTK_LABEL(app->lbl_zoom), buf);
 
         gtk_widget_queue_draw(app->selection_area);
         gtk_widget_queue_draw(app->image_area);
     } else {
-        int req_w = (int)(img_w * app->zoom_factor);
-        int req_h = (int)(img_h * app->zoom_factor);
+        int req_w = (int)(eff_w * app->zoom_factor);
+        int req_h = (int)(eff_h * app->zoom_factor);
 
         gtk_widget_set_size_request(app->image_area, req_w, req_h);
 
@@ -2152,59 +2186,63 @@ draw_image_area_func (GtkDrawingArea *area,
         stride
     );
 
-    double off_x, off_y, scale;
-    get_image_screen_geometry(app, &off_x, &off_y, &scale);
+    double cx, cy, scale;
+    get_image_screen_geometry(app, &cx, &cy, &scale);
 
-    double int_off_x = 0;
-    double int_off_y = 0;
+    cairo_save(cr);
 
-    if (app->fit_window) {
-        double scale_x = (double)width / app->img_width;
-        double scale_y = (double)height / app->img_height;
-        scale = (scale_x < scale_y) ? scale_x : scale_y;
-
-        double display_w = app->img_width * scale;
-        double display_h = app->img_height * scale;
-
-        int_off_x = (width - display_w) / 2.0;
-        int_off_y = (height - display_h) / 2.0;
-    } else {
-        scale = app->zoom_factor;
-        double display_w = app->img_width * scale;
-        double display_h = app->img_height * scale;
-
-        if (width > display_w) int_off_x = (width - display_w) / 2.0;
-        if (height > display_h) int_off_y = (height - display_h) / 2.0;
-    }
-
-    cairo_translate(cr, int_off_x, int_off_y);
+    cairo_translate(cr, cx, cy);
     cairo_scale(cr, scale, scale);
+    cairo_rotate(cr, app->rot_angle * (M_PI / 2.0));
+    cairo_scale(cr, app->flip_x ? -1.0 : 1.0, app->flip_y ? -1.0 : 1.0);
+    cairo_translate(cr, -app->img_width / 2.0, -app->img_height / 2.0);
 
     cairo_set_source_surface(cr, surface, 0, 0);
     cairo_pattern_set_filter(cairo_get_source(cr), CAIRO_FILTER_NEAREST);
     cairo_paint(cr);
 
+    cairo_restore(cr);
     cairo_surface_destroy(surface);
 }
 
 static void
 widget_to_image_coords(ViewerApp *app, double wx, double wy, int *ix, int *iy) {
-    double offset_x, offset_y, scale;
-    get_image_screen_geometry(app, &offset_x, &offset_y, &scale);
+    double cx, cy, scale;
+    get_image_screen_geometry(app, &cx, &cy, &scale);
 
-    double lx = (wx - offset_x) / scale;
-    double ly = (wy - offset_y) / scale;
+    // Inverse Transform
+    double x = wx - cx;
+    double y = wy - cy;
 
-    if (lx < 0) lx = 0;
-    if (ly < 0) ly = 0;
-    if (lx >= app->image->md->size[0]) lx = app->image->md->size[0] - 1;
-    if (ly >= app->image->md->size[1]) ly = app->image->md->size[1] - 1;
+    // Inv Scale
+    x /= scale;
+    y /= scale;
 
-    *ix = (int)lx;
-    *iy = (int)ly;
+    // Inv Rotate (rotate by -angle)
+    double angle = -app->rot_angle * (M_PI / 2.0);
+    double rx = x * cos(angle) - y * sin(angle);
+    double ry = x * sin(angle) + y * cos(angle);
+    x = rx; y = ry;
+
+    // Inv Flip
+    if (app->flip_x) x = -x;
+    if (app->flip_y) y = -y;
+
+    // Inv Translate (center)
+    x += app->img_width / 2.0;
+    y += app->img_height / 2.0;
+
+    // Clamp
+    if (x < 0) x = 0;
+    if (y < 0) y = 0;
+    if (x >= app->image->md->size[0]) x = app->image->md->size[0] - 1;
+    if (y >= app->image->md->size[1]) y = app->image->md->size[1] - 1;
+
+    *ix = (int)x;
+    *iy = (int)y;
 }
 
-// Drawing function for selection overlay
+// Drawing function for selection overlay and Orientation
 static void
 draw_selection_func (GtkDrawingArea *area,
                      cairo_t        *cr,
@@ -2214,37 +2252,70 @@ draw_selection_func (GtkDrawingArea *area,
 {
     ViewerApp *app = (ViewerApp *)user_data;
 
-    if (!app->is_dragging && !app->selection_active && !app->is_moving_selection) return;
+    double cx, cy, scale;
+    get_image_screen_geometry(app, &cx, &cy, &scale);
 
-    double x1, y1, x2, y2;
-    double offset_x, offset_y, scale;
-    get_image_screen_geometry(app, &offset_x, &offset_y, &scale);
+    // Draw Orientation Overlay
+    cairo_save(cr);
+    cairo_translate(cr, cx, cy);
+    cairo_scale(cr, scale, scale);
+    cairo_rotate(cr, app->rot_angle * (M_PI / 2.0));
+    cairo_scale(cr, app->flip_x ? -1.0 : 1.0, app->flip_y ? -1.0 : 1.0);
+    cairo_translate(cr, -app->img_width / 2.0, -app->img_height / 2.0);
 
-    if (app->is_moving_selection) {
-        x1 = app->sel_x1 * scale + offset_x;
-        y1 = app->sel_y1 * scale + offset_y;
-        x2 = app->sel_x2 * scale + offset_x;
-        y2 = app->sel_y2 * scale + offset_y;
-        x2 += scale;
-        y2 += scale;
-    } else if (app->is_dragging) {
-        x1 = app->start_x;
-        y1 = app->start_y;
-        x2 = app->curr_x;
-        y2 = app->curr_y;
-    } else {
-        x1 = app->sel_x1 * scale + offset_x;
-        y1 = app->sel_y1 * scale + offset_y;
-        x2 = app->sel_x2 * scale + offset_x;
-        y2 = app->sel_y2 * scale + offset_y;
-        x2 += scale;
-        y2 += scale;
-    }
+    // Draw Origin Dot (0,0) - Yellow
+    cairo_set_source_rgb(cr, 1, 1, 0);
+    cairo_arc(cr, 0, 0, 5.0 / scale, 0, 2*M_PI);
+    cairo_fill(cr);
 
+    // Draw X Vector (Red)
     cairo_set_source_rgb(cr, 1, 0, 0);
-    cairo_set_line_width(cr, 2);
-    cairo_rectangle(cr, x1, y1, x2 - x1, y2 - y1);
+    cairo_set_line_width(cr, 2.0 / scale);
+    cairo_move_to(cr, 0, 0);
+    cairo_line_to(cr, 30.0 / scale, 0);
     cairo_stroke(cr);
+    // Arrowhead X
+    cairo_move_to(cr, 30.0 / scale, 0);
+    cairo_line_to(cr, 25.0 / scale, -3.0 / scale);
+    cairo_line_to(cr, 25.0 / scale, 3.0 / scale);
+    cairo_close_path(cr);
+    cairo_fill(cr);
+
+    // Draw Y Vector (Green)
+    cairo_set_source_rgb(cr, 0, 1, 0);
+    cairo_move_to(cr, 0, 0);
+    cairo_line_to(cr, 0, 30.0 / scale);
+    cairo_stroke(cr);
+    // Arrowhead Y
+    cairo_move_to(cr, 0, 30.0 / scale);
+    cairo_line_to(cr, -3.0 / scale, 25.0 / scale);
+    cairo_line_to(cr, 3.0 / scale, 25.0 / scale);
+    cairo_close_path(cr);
+    cairo_fill(cr);
+
+    cairo_restore(cr);
+
+    // Draw Selection
+    if (app->is_dragging) {
+        cairo_set_source_rgb(cr, 1, 0, 0);
+        cairo_set_line_width(cr, 2);
+        cairo_rectangle(cr, app->start_x, app->start_y, app->curr_x - app->start_x, app->curr_y - app->start_y);
+        cairo_stroke(cr);
+    } else if (app->selection_active || app->is_moving_selection) {
+        cairo_save(cr);
+        cairo_translate(cr, cx, cy);
+        cairo_scale(cr, scale, scale);
+        cairo_rotate(cr, app->rot_angle * (M_PI / 2.0));
+        cairo_scale(cr, app->flip_x ? -1.0 : 1.0, app->flip_y ? -1.0 : 1.0);
+        cairo_translate(cr, -app->img_width / 2.0, -app->img_height / 2.0);
+
+        cairo_set_source_rgb(cr, 1, 0, 0);
+        cairo_set_line_width(cr, 2.0 / scale);
+        cairo_rectangle(cr, app->sel_x1, app->sel_y1, app->sel_x2 - app->sel_x1, app->sel_y2 - app->sel_y1);
+        cairo_stroke(cr);
+
+        cairo_restore(cr);
+    }
 }
 
 // Gesture callbacks (Left Click: ROI)
@@ -3151,6 +3222,26 @@ activate (GtkApplication *app,
     g_signal_connect(btn_as_source, "toggled", G_CALLBACK(on_btn_autoscale_source_toggled), viewer);
     gtk_box_append(GTK_BOX(row), btn_as_source);
 
+    // Orientation Controls
+    row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 5);
+    gtk_box_append(GTK_BOX(viewer->vbox_controls), row);
+
+    GtkWidget *btn_rot_cw = gtk_button_new_with_label("-90");
+    g_signal_connect(btn_rot_cw, "clicked", G_CALLBACK(on_rotate_cw_clicked), viewer);
+    gtk_box_append(GTK_BOX(row), btn_rot_cw);
+
+    GtkWidget *btn_rot_ccw = gtk_button_new_with_label("+90");
+    g_signal_connect(btn_rot_ccw, "clicked", G_CALLBACK(on_rotate_ccw_clicked), viewer);
+    gtk_box_append(GTK_BOX(row), btn_rot_ccw);
+
+    GtkWidget *btn_flip_x = gtk_button_new_with_label("FlipX");
+    g_signal_connect(btn_flip_x, "clicked", G_CALLBACK(on_flip_x_clicked), viewer);
+    gtk_box_append(GTK_BOX(row), btn_flip_x);
+
+    GtkWidget *btn_flip_y = gtk_button_new_with_label("FlipY");
+    g_signal_connect(btn_flip_y, "clicked", G_CALLBACK(on_flip_y_clicked), viewer);
+    gtk_box_append(GTK_BOX(row), btn_flip_y);
+
     // Min Control
     row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 5);
     gtk_box_append(GTK_BOX(viewer->vbox_controls), row);
@@ -3632,6 +3723,7 @@ activate (GtkApplication *app,
 
     viewer->fit_window = TRUE;
     viewer->zoom_factor = 1.0;
+    viewer->flip_y = TRUE; // Default Cartesian (0,0 bottom left)
 
     // Set initial colormap range
     viewer->cmap_min = 0.0;
