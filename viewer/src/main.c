@@ -1668,6 +1668,10 @@ draw_trace_func (GtkDrawingArea *area,
     cairo_set_source_rgb(cr, 0.1, 0.1, 0.1);
     cairo_paint(cr);
 
+    int margin_bottom = 20;
+    int plot_height = height - margin_bottom;
+    if (plot_height <= 0) return;
+
     // Determine Time Range
     int head = app->trace_head;
     int count = app->trace_count;
@@ -1695,12 +1699,12 @@ draw_trace_func (GtkDrawingArea *area,
     if (visible_count < 2) return;
 
     // Draw Heatmap
-    cairo_surface_t *surf = cairo_image_surface_create(CAIRO_FORMAT_RGB24, width, height);
+    cairo_surface_t *surf = cairo_image_surface_create(CAIRO_FORMAT_RGB24, width, plot_height);
     uint32_t *pixels = (uint32_t*)cairo_image_surface_get_data(surf);
     int stride = cairo_image_surface_get_stride(surf) / 4;
 
     // Clear surface
-    memset(pixels, 0, height * stride * 4);
+    memset(pixels, 0, plot_height * stride * 4);
 
     double time_scale = width / app->trace_duration;
     double t_start_disp = t_end - app->trace_duration;
@@ -1740,9 +1744,9 @@ draw_trace_func (GtkDrawingArea *area,
             int x = x0 + dx;
             if (x < 0 || x >= width) continue;
 
-            for (int y = 0; y < height; ++y) {
+            for (int y = 0; y < plot_height; ++y) {
                 // Map Y to Value
-                double val = max_y - (double)y / height * (max_y - min_y);
+                double val = max_y - (double)y / plot_height * (max_y - min_y);
 
                 // Map Value to Bin
                 int bin = (int)((val - h_min) / h_range * (TRACE_HIST_BINS - 1));
@@ -1814,25 +1818,25 @@ draw_trace_func (GtkDrawingArea *area,
             cairo_text_extents_t extents;
             cairo_text_extents(cr, buf, &extents);
 
-            cairo_move_to(cr, x - extents.width/2, height - 2);
+            cairo_move_to(cr, x - extents.width/2, height - 5);
             cairo_show_text(cr, buf);
 
-            cairo_move_to(cr, x, height - 12);
-            cairo_line_to(cr, x, height - 15);
+            cairo_move_to(cr, x, plot_height);
+            cairo_line_to(cr, x, plot_height + 5);
             cairo_stroke(cr);
         }
     }
 
     // Draw Lines
     #define MAP_X(t) ((t - (t_end - app->trace_duration)) / app->trace_duration * width)
-    #define MAP_Y(v) (height - (v - min_y) / (max_y - min_y) * height)
+    #define MAP_Y(v) (plot_height - (v - min_y) / (max_y - min_y) * plot_height)
 
     cairo_set_line_width(cr, 1);
 
     // Highlight Line (Yellow Dashed Horizontal)
     if (app->highlight_active) {
         double y = MAP_Y(app->highlight_val);
-        if (y >= 0 && y <= height) {
+        if (y >= 0 && y <= plot_height) {
             cairo_set_source_rgb(cr, 1, 1, 0);
             cairo_set_line_width(cr, 2);
             cairo_set_dash(cr, (double[]){4.0, 4.0}, 1, 0);
@@ -3688,7 +3692,7 @@ main (int    argc,
     viewer.trace_hist_min = (double*)calloc(TRACE_MAX_SAMPLES, sizeof(double));
     viewer.trace_hist_max = (double*)calloc(TRACE_MAX_SAMPLES, sizeof(double));
 
-    viewer.trace_duration = 60.0; // Default 60s
+    viewer.trace_duration = 10.0; // Default 10s
     clock_gettime(CLOCK_MONOTONIC, &viewer.program_start_time);
 
     viewer.last_min_mode = AUTO_DATA;
