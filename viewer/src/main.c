@@ -222,7 +222,7 @@ typedef struct {
 
     // Trace UI
     GtkWidget *check_trace;
-    GtkWidget *lbl_trace_dur;
+    GtkWidget *entry_trace_dur;
     GtkWidget *trace_area;
     struct timespec program_start_time;
 
@@ -1986,13 +1986,29 @@ on_trace_toggled (GtkCheckButton *btn, gpointer user_data)
 }
 
 static void
+on_trace_dur_entry_activate (GtkEntry *entry, gpointer user_data)
+{
+    ViewerApp *app = (ViewerApp *)user_data;
+    const char *text = gtk_editable_get_text(GTK_EDITABLE(entry));
+    double val = atof(text);
+    if (val < 1.0) val = 1.0;
+    app->trace_duration = val;
+
+    char buf[32];
+    snprintf(buf, sizeof(buf), "%.1fs", app->trace_duration);
+    gtk_editable_set_text(GTK_EDITABLE(entry), buf);
+
+    if (app->trace_area) gtk_widget_queue_draw(app->trace_area);
+}
+
+static void
 on_trace_dur_increase (GtkButton *btn, gpointer user_data)
 {
     ViewerApp *app = (ViewerApp *)user_data;
     app->trace_duration *= 1.2;
     char buf[32];
     snprintf(buf, sizeof(buf), "%.1fs", app->trace_duration);
-    gtk_label_set_text(GTK_LABEL(app->lbl_trace_dur), buf);
+    gtk_editable_set_text(GTK_EDITABLE(app->entry_trace_dur), buf);
     gtk_widget_queue_draw(app->trace_area);
 }
 
@@ -2004,7 +2020,7 @@ on_trace_dur_decrease (GtkButton *btn, gpointer user_data)
     if (app->trace_duration < 1.0) app->trace_duration = 1.0;
     char buf[32];
     snprintf(buf, sizeof(buf), "%.1fs", app->trace_duration);
-    gtk_label_set_text(GTK_LABEL(app->lbl_trace_dur), buf);
+    gtk_editable_set_text(GTK_EDITABLE(app->entry_trace_dur), buf);
     gtk_widget_queue_draw(app->trace_area);
 }
 
@@ -3793,8 +3809,11 @@ activate (GtkApplication *app,
 
     char buf_dur[32];
     snprintf(buf_dur, sizeof(buf_dur), "%.1fs", viewer->trace_duration);
-    viewer->lbl_trace_dur = gtk_label_new(buf_dur);
-    gtk_box_append(GTK_BOX(stat_row), viewer->lbl_trace_dur);
+    viewer->entry_trace_dur = gtk_entry_new();
+    gtk_editable_set_text(GTK_EDITABLE(viewer->entry_trace_dur), buf_dur);
+    gtk_widget_set_size_request(viewer->entry_trace_dur, 60, -1);
+    gtk_box_append(GTK_BOX(stat_row), viewer->entry_trace_dur);
+    g_signal_connect(viewer->entry_trace_dur, "activate", G_CALLBACK(on_trace_dur_entry_activate), viewer);
 
     GtkWidget *btn_inc = gtk_button_new_with_label("+");
     gtk_widget_set_size_request(btn_inc, 20, -1);
