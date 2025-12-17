@@ -158,6 +158,11 @@ typedef struct {
     gboolean trace_active;
     double trace_duration;
 
+    // Trace Cursor
+    int trace_cursor_idx;
+    gboolean trace_cursor_active;
+    gboolean trace_cursor_frozen;
+
     // UI Widgets
     GtkWidget *lbl_counter;
     GtkWidget *dropdown_fps;
@@ -1415,7 +1420,33 @@ draw_histogram_func (GtkDrawingArea *area,
                      gpointer        user_data)
 {
     ViewerApp *app = (ViewerApp *)user_data;
-    if (!app->hist_data || app->hist_max_count == 0) return;
+
+    // Determine Data Source (Live vs Historical)
+    uint32_t *data_source = app->hist_data;
+    uint32_t max_cnt = app->hist_max_count;
+    double range_min = app->current_min;
+    double range_max = app->current_max;
+
+    gboolean use_history = (!gtk_check_button_get_active(GTK_CHECK_BUTTON(app->btn_stats_update)) &&
+                            app->trace_cursor_active &&
+                            app->trace_count > 0);
+
+    if (use_history) {
+        int idx = app->trace_cursor_idx;
+        if (idx >= 0 && idx < TRACE_MAX_SAMPLES) {
+            data_source = app->trace_hist_data + idx * TRACE_HIST_BINS;
+            range_min = app->trace_hist_min[idx];
+            range_max = app->trace_hist_max[idx];
+
+            // Recompute max_cnt for this slice
+            max_cnt = 0;
+            for(int i=0; i<app->hist_bins; ++i) {
+                if (data_source[i] > max_cnt) max_cnt = data_source[i];
+            }
+        }
+    }
+
+    if (!data_source || max_cnt == 0) return;
 
     cairo_set_source_rgb(cr, 0.2, 0.2, 0.2); // Dark gray background
     cairo_paint(cr);
@@ -1430,18 +1461,18 @@ draw_histogram_func (GtkDrawingArea *area,
     double bin_width = (double)plot_w / app->hist_bins;
     gboolean log_scale = (gtk_drop_down_get_selected(GTK_DROP_DOWN(app->dropdown_hist_scale)) == 1);
 
-    double max_val = (double)app->hist_max_count;
+    double max_val = (double)max_cnt;
     if (log_scale) max_val = log10(max_val + 1.0);
 
     // Calculate CDF
     double total_count = 0;
-    for (int i = 0; i < app->hist_bins; i++) total_count += app->hist_data[i];
+    for (int i = 0; i < app->hist_bins; i++) total_count += data_source[i];
 
     // Draw Bars
-    double range = app->current_max - app->current_min;
+    double range = range_max - range_min;
 
     for (int i = 0; i < app->hist_bins; ++i) {
-        double val = (double)app->hist_data[i];
+        double val = (double)data_source[i];
         if (log_scale) val = log10(val + 1.0);
 
         double h = (val / max_val) * plot_h;
@@ -1449,7 +1480,7 @@ draw_histogram_func (GtkDrawingArea *area,
 
         // Color based on cursor position if active
         if (app->highlight_active) {
-            double bin_center_val = app->current_min + (i + 0.5) / app->hist_bins * range;
+            double bin_center_val = range_min + (i + 0.5) / app->hist_bins * range;
             if (bin_center_val < app->highlight_val) {
                 cairo_set_source_rgb(cr, 0.2, 0.2, 0.8); // Blueish
             } else {
@@ -1472,7 +1503,7 @@ draw_histogram_func (GtkDrawingArea *area,
         cairo_set_source_rgb(cr, 1, 0, 0);
         cum = 0;
         for (int i = 0; i < app->hist_bins; ++i) {
-            cum += app->hist_data[i];
+            cum += data_source[i];
             double frac = cum / total_count;
             double x = margin_left + (i + 0.5) * bin_width;
             double y = plot_h * (1.0 - frac);
@@ -1485,7 +1516,7 @@ draw_histogram_func (GtkDrawingArea *area,
         cairo_set_source_rgb(cr, 0, 0, 1);
         cum = 0;
         for (int i = 0; i < app->hist_bins; ++i) {
-            cum += app->hist_data[i];
+            cum += data_source[i];
             double frac = cum / total_count;
             double inv_frac = 1.0 - frac;
             double x = margin_left + (i + 0.5) * bin_width;
@@ -1509,18 +1540,18 @@ draw_histogram_func (GtkDrawingArea *area,
 
     char buf[64];
     // Y Axis Max
-    snprintf(buf, sizeof(buf), "%u", app->hist_max_count);
+    snprintf(buf, sizeof(buf), "%u", max_cnt);
     cairo_move_to(cr, 2, 10);
     cairo_show_text(cr, buf);
 
     // X Axis Min
-    snprintf(buf, sizeof(buf), "%.2g", app->current_min);
+    snprintf(buf, sizeof(buf), "%.2g", range_min);
     cairo_move_to(cr, margin_left, height - 5);
     cairo_show_text(cr, buf);
 
     // X Axis Max
     cairo_text_extents_t extents;
-    snprintf(buf, sizeof(buf), "%.2g", app->current_max);
+    snprintf(buf, sizeof(buf), "%.2g", range_max);
     cairo_text_extents(cr, buf, &extents);
     cairo_move_to(cr, width - extents.width - 5, height - 5);
     cairo_show_text(cr, buf);
@@ -1530,11 +1561,13 @@ draw_histogram_func (GtkDrawingArea *area,
     if (range > 0) {
         double val, norm, x;
         int trace_idx = (app->trace_head - 1 + TRACE_MAX_SAMPLES) % TRACE_MAX_SAMPLES;
+        if (use_history) trace_idx = app->trace_cursor_idx;
+
         if (app->trace_count > 0) {
             // Min (Dark Blue)
             if (app->show_trace_min) {
                 val = app->trace_min[trace_idx];
-                norm = (val - app->current_min) / range;
+                norm = (val - range_min) / range;
                 if (norm >= 0 && norm <= 1.0) {
                     cairo_set_source_rgb(cr, 0, 0, 0.5);
                     x = margin_left + norm * plot_w;
@@ -1544,7 +1577,7 @@ draw_histogram_func (GtkDrawingArea *area,
             // Max (Dark Red)
             if (app->show_trace_max) {
                 val = app->trace_max[trace_idx];
-                norm = (val - app->current_min) / range;
+                norm = (val - range_min) / range;
                 if (norm >= 0 && norm <= 1.0) {
                     cairo_set_source_rgb(cr, 0.5, 0, 0);
                     x = margin_left + norm * plot_w;
@@ -1554,7 +1587,7 @@ draw_histogram_func (GtkDrawingArea *area,
             // P10 (Cyan)
             if (app->show_trace_p01) {
                 val = app->trace_p01[trace_idx];
-                norm = (val - app->current_min) / range;
+                norm = (val - range_min) / range;
                 if (norm >= 0 && norm <= 1.0) {
                     cairo_set_source_rgb(cr, 0, 1, 1);
                     x = margin_left + norm * plot_w;
@@ -1564,7 +1597,7 @@ draw_histogram_func (GtkDrawingArea *area,
             // P90 (Magenta)
             if (app->show_trace_p09) {
                 val = app->trace_p09[trace_idx];
-                norm = (val - app->current_min) / range;
+                norm = (val - range_min) / range;
                 if (norm >= 0 && norm <= 1.0) {
                     cairo_set_source_rgb(cr, 1, 0, 1);
                     x = margin_left + norm * plot_w;
@@ -1573,8 +1606,8 @@ draw_histogram_func (GtkDrawingArea *area,
             }
             // Mean (Green)
             if (app->show_trace_mean) {
-                val = app->stats_mean;
-                norm = (val - app->current_min) / range;
+                val = use_history ? app->trace_mean[trace_idx] : app->stats_mean;
+                norm = (val - range_min) / range;
                 if (norm >= 0 && norm <= 1.0) {
                     cairo_set_source_rgb(cr, 0, 1, 0);
                     x = margin_left + norm * plot_w;
@@ -1583,8 +1616,8 @@ draw_histogram_func (GtkDrawingArea *area,
             }
             // Median (Yellow)
             if (app->show_trace_median) {
-                val = app->stats_median;
-                norm = (val - app->current_min) / range;
+                val = use_history ? app->trace_median[trace_idx] : app->stats_median;
+                norm = (val - range_min) / range;
                 if (norm >= 0 && norm <= 1.0) {
                     cairo_set_source_rgb(cr, 1, 1, 0);
                     x = margin_left + norm * plot_w;
@@ -1601,12 +1634,12 @@ draw_histogram_func (GtkDrawingArea *area,
 
         int bin = (int)((app->highlight_mouse_x_hist - margin_left) / bin_width);
         if (bin >= 0 && bin < app->hist_bins) {
-            double bin_val = app->current_min + (double)bin / app->hist_bins * range;
-            uint32_t count = app->hist_data[bin];
+            double bin_val = range_min + (double)bin / app->hist_bins * range;
+            uint32_t count = data_source[bin];
 
             // Recompute CDF for this bin
             double cum = 0;
-            for (int i = 0; i <= bin; ++i) cum += app->hist_data[i];
+            for (int i = 0; i <= bin; ++i) cum += data_source[i];
             double cdf = (total_count > 0) ? (cum / total_count * 100.0) : 0;
             double inv = 100.0 - cdf;
 
@@ -1660,6 +1693,99 @@ draw_histogram_func (GtkDrawingArea *area,
     // Mean/Median are drawn around lines 1320. Overlay is around 1330.
 
     // Let's do a targeted replace for the Mean/Median section to add Min/Max/P10/P90.
+}
+
+static int
+get_trace_index_at_x(ViewerApp *app, double x, int width) {
+    if (app->trace_count == 0 || width <= 0) return -1;
+
+    int head = app->trace_head;
+    int tail_idx = (head - 1 + TRACE_MAX_SAMPLES) % TRACE_MAX_SAMPLES;
+    double t_end = app->trace_time[tail_idx];
+
+    double t_target = (x / (double)width) * app->trace_duration + (t_end - app->trace_duration);
+
+    int best_idx = -1;
+    double min_diff = 1e30;
+
+    for (int i = 0; i < app->trace_count; ++i) {
+        int idx = (head - 1 - i + TRACE_MAX_SAMPLES) % TRACE_MAX_SAMPLES;
+        double diff = fabs(app->trace_time[idx] - t_target);
+        if (diff < min_diff) {
+            min_diff = diff;
+            best_idx = idx;
+        } else {
+             // Heuristic optimization
+            if (app->trace_time[idx] < t_target - app->trace_duration * 0.1) {
+                break;
+            }
+        }
+    }
+    return best_idx;
+}
+
+static void
+on_motion_trace (GtkEventControllerMotion *controller,
+                 double                    x,
+                 double                    y,
+                 gpointer                  user_data)
+{
+    ViewerApp *app = (ViewerApp *)user_data;
+
+    // Only engage if Update is OFF
+    if (gtk_check_button_get_active(GTK_CHECK_BUTTON(app->btn_stats_update))) {
+         return;
+    }
+
+    int width = gtk_widget_get_width(app->trace_area);
+    int idx = get_trace_index_at_x(app, x, width);
+
+    if (idx >= 0 && !app->trace_cursor_frozen) {
+        app->trace_cursor_idx = idx;
+        app->trace_cursor_active = TRUE;
+        gtk_widget_queue_draw(app->trace_area);
+        if (gtk_widget_get_visible(app->histogram_area)) {
+            gtk_widget_queue_draw(app->histogram_area);
+        }
+    }
+}
+
+static void
+on_leave_trace (GtkEventControllerMotion *controller,
+                gpointer                  user_data)
+{
+    ViewerApp *app = (ViewerApp *)user_data;
+    if (!app->trace_cursor_frozen) {
+        app->trace_cursor_active = FALSE;
+        gtk_widget_queue_draw(app->trace_area);
+        if (gtk_widget_get_visible(app->histogram_area)) {
+            gtk_widget_queue_draw(app->histogram_area);
+        }
+    }
+}
+
+static void
+on_click_trace_pressed (GtkGestureClick *gesture,
+                        int              n_press,
+                        double           x,
+                        double           y,
+                        gpointer         user_data)
+{
+    ViewerApp *app = (ViewerApp *)user_data;
+    if (gtk_check_button_get_active(GTK_CHECK_BUTTON(app->btn_stats_update))) return;
+
+    app->trace_cursor_frozen = !app->trace_cursor_frozen;
+
+    if (!app->trace_cursor_frozen) {
+         int width = gtk_widget_get_width(app->trace_area);
+         int idx = get_trace_index_at_x(app, x, width);
+         if (idx >= 0) {
+             app->trace_cursor_idx = idx;
+             app->trace_cursor_active = TRUE;
+         }
+    }
+
+    gtk_widget_queue_draw(app->trace_area);
 }
 
 static void
@@ -1970,6 +2096,46 @@ draw_trace_func (GtkDrawingArea *area,
             else cairo_line_to(cr, x, y);
         }
         cairo_stroke(cr);
+    }
+
+    // Draw Cursor Line (Vertical) when Update is OFF
+    if (app->trace_cursor_active && !gtk_check_button_get_active(GTK_CHECK_BUTTON(app->btn_stats_update))) {
+        int idx = app->trace_cursor_idx;
+        double t = app->trace_time[idx];
+        double x = MAP_X(t);
+
+        if (x >= 0 && x <= width) {
+             // Draw Line
+             if (app->trace_cursor_frozen) {
+                 cairo_set_source_rgb(cr, 0, 1, 1); // Cyan for frozen
+             } else {
+                 cairo_set_source_rgb(cr, 1, 1, 1); // White for hover
+             }
+             cairo_set_line_width(cr, 1);
+             cairo_move_to(cr, x, 0);
+             cairo_line_to(cr, x, plot_height);
+             cairo_stroke(cr);
+
+             // Draw Time Label
+             char buf[32];
+             double t_rel = t - t_end; // Relative to current end
+             snprintf(buf, sizeof(buf), "%.2fs", t_rel);
+
+             cairo_text_extents_t extents;
+             cairo_text_extents(cr, buf, &extents);
+
+             double tx = x + 5;
+             if (tx + extents.width > width) tx = x - 5 - extents.width;
+             double ty = plot_height / 2;
+
+             cairo_set_source_rgba(cr, 0, 0, 0, 0.7);
+             cairo_rectangle(cr, tx - 2, ty - extents.height, extents.width + 4, extents.height + 4);
+             cairo_fill(cr);
+
+             cairo_set_source_rgb(cr, 1, 1, 1);
+             cairo_move_to(cr, tx, ty);
+             cairo_show_text(cr, buf);
+        }
     }
 }
 
@@ -3826,6 +3992,17 @@ activate (GtkApplication *app,
     gtk_drawing_area_set_draw_func(GTK_DRAWING_AREA(viewer->trace_area), draw_trace_func, viewer, NULL);
     gtk_widget_set_visible(viewer->trace_area, FALSE); // Hidden by default
     gtk_box_append(GTK_BOX(viewer->box_stats), viewer->trace_area);
+
+    // Trace Interaction
+    GtkEventController *trace_motion = gtk_event_controller_motion_new();
+    g_signal_connect(trace_motion, "motion", G_CALLBACK(on_motion_trace), viewer);
+    g_signal_connect(trace_motion, "leave", G_CALLBACK(on_leave_trace), viewer);
+    gtk_widget_add_controller(viewer->trace_area, trace_motion);
+
+    GtkGesture *trace_click = gtk_gesture_click_new();
+    gtk_gesture_single_set_button(GTK_GESTURE_SINGLE(trace_click), GDK_BUTTON_PRIMARY);
+    g_signal_connect(trace_click, "pressed", G_CALLBACK(on_click_trace_pressed), viewer);
+    gtk_widget_add_controller(viewer->trace_area, GTK_EVENT_CONTROLLER(trace_click));
 
     gtk_widget_set_visible(viewer->box_stats, FALSE);
 
