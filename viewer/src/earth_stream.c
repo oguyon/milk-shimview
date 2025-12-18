@@ -12,6 +12,7 @@
 #define CX 127.5
 #define CY 127.5
 #define FPS 100
+#define HISTORY_DEPTH 200
 
 // Simple hash for noise
 unsigned int hash(unsigned int x) {
@@ -79,11 +80,13 @@ int main(int argc, char **argv) {
     if (argc > 1) stream_name = argv[1];
 
     IMAGE image;
-    uint32_t dims[2] = {WIDTH, HEIGHT};
+    uint32_t dims[3] = {WIDTH, HEIGHT, HISTORY_DEPTH};
 
     // Create shared memory image
-    // 2D, Float, Shared=1, NBkw=0, CBsize=0
-    if (ImageStreamIO_createIm(&image, stream_name, 2, dims, _DATATYPE_FLOAT, 1, 0, 0) != 0) {
+    // 3D, Float, Shared=1, NBkw=0, CBsize=1 (to mark as Circular Buffer)
+    // Note: ImageStreamIO convention for Circular Buffer often requires setting the flag or CBsize
+    // We create a 3D volume which acts as the buffer.
+    if (ImageStreamIO_createIm(&image, stream_name, 3, dims, _DATATYPE_FLOAT, 1, 0, 1) != 0) {
         fprintf(stderr, "Error creating stream %s\n", stream_name);
         return 1;
     }
@@ -109,7 +112,9 @@ int main(int argc, char **argv) {
     lx /= l_len; ly /= l_len; lz /= l_len;
 
     while(1) {
-        float *data = (float*)image.array.raw;
+        // Calculate offset for circular buffer
+        uint64_t slice_idx = image.md->cnt1 % HISTORY_DEPTH;
+        float *data = (float*)image.array.raw + (slice_idx * WIDTH * HEIGHT);
 
         // Tilt between 0 and 90 degrees (0 to PI/2 radians)
         // Sine wave: 45 + 45 * sin(phase) -> 0..90 deg
@@ -167,6 +172,7 @@ int main(int argc, char **argv) {
         }
 
         image.md->cnt0++;
+        image.md->cnt1++; // Increment circular buffer index
         ImageStreamIO_sempost(&image, -1);
 
         rotation += speed;

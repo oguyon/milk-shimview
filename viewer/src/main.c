@@ -1758,6 +1758,9 @@ on_motion_trace (GtkEventControllerMotion *controller,
         if (gtk_widget_get_visible(app->histogram_area)) {
             gtk_widget_queue_draw(app->histogram_area);
         }
+
+        // Force update of main display for history playback
+        if (app->paused) app->force_redraw = TRUE;
     }
 }
 
@@ -1772,6 +1775,8 @@ on_leave_trace (GtkEventControllerMotion *controller,
         if (gtk_widget_get_visible(app->histogram_area)) {
             gtk_widget_queue_draw(app->histogram_area);
         }
+        // Restore live/frozen display
+        if (app->paused) app->force_redraw = TRUE;
     }
 }
 
@@ -1797,6 +1802,7 @@ on_click_trace_pressed (GtkGestureClick *gesture,
     }
 
     gtk_widget_queue_draw(app->trace_area);
+    if (app->paused) app->force_redraw = TRUE;
 }
 
 static void
