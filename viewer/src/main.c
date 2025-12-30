@@ -332,9 +332,18 @@ typedef struct {
     StreamContext streams[2];
     int active_stream; // 0 or 1
 
+    // Primary UI
+    GtkWidget *entry_prim_stream;
+    GtkWidget *btn_prim_load;
+    GtkWidget *entry_prim_current;
+    GtkWidget *btn_prim_display;
+
+    // Secondary UI
     GtkWidget *entry_sec_stream;
     GtkWidget *btn_sec_load;
-    GtkWidget *btn_stream_toggle;
+    GtkWidget *entry_sec_current;
+    GtkWidget *btn_sec_display;
+    GtkWidget *btn_sec_clear;
 
     // Blink
     GtkWidget *btn_blink;
@@ -390,11 +399,16 @@ gboolean update_display (gpointer user_data);
 static void on_btn_autoscale_toggled (GtkToggleButton *btn, gpointer user_data);
 static void update_tbin_menu_state (ViewerApp *app);
 static void update_rms_menu_state (ViewerApp *app);
+static void on_prim_entry_changed(GtkEditable *editable, gpointer user_data);
+static void on_prim_load_clicked(GtkButton *btn, gpointer user_data);
+static void on_prim_display_clicked(GtkButton *btn, gpointer user_data);
 static void on_sec_entry_changed(GtkEditable *editable, gpointer user_data);
 static void on_sec_load_clicked(GtkButton *btn, gpointer user_data);
-static void on_stream_toggle_toggled(GtkToggleButton *btn, gpointer user_data);
+static void on_sec_display_clicked(GtkButton *btn, gpointer user_data);
+static void on_sec_clear_clicked(GtkButton *btn, gpointer user_data);
 static void on_blink_toggled(GtkToggleButton *btn, gpointer user_data);
 static void on_blink_time_changed(GtkDropDown *dropdown, GParamSpec *pspec, gpointer user_data);
+static void update_stream_ui_state(ViewerApp *app);
 
 static void save_current_stream_state(ViewerApp *app) {
     int idx = app->active_stream;
@@ -463,6 +477,135 @@ static void load_stream_state(ViewerApp *app, int idx) {
     // Force Autoscale toggle visual update?
     // The dropdown change triggers on_min_mode_changed which updates the toggle.
     // So setting dropdowns should be enough.
+}
+
+static void
+update_stream_ui_state(ViewerApp *app) {
+    // Update Display Buttons
+    if (app->btn_prim_display) {
+        if (app->active_stream == 0) gtk_widget_add_css_class(app->btn_prim_display, "btn-green");
+        else gtk_widget_remove_css_class(app->btn_prim_display, "btn-green");
+    }
+    if (app->btn_sec_display) {
+        if (app->active_stream == 1) gtk_widget_add_css_class(app->btn_sec_display, "btn-green");
+        else gtk_widget_remove_css_class(app->btn_sec_display, "btn-green");
+
+        // Disable secondary display button if stream not loaded?
+        // "Display button. Green if secondary is displayed, grey otherwise."
+        // Grey usually implies insensitive, but here it might just mean default color.
+        // But if no stream is loaded, it should probably be insensitive.
+        gtk_widget_set_sensitive(app->btn_sec_display, (app->streams[1].image != NULL));
+    }
+
+    // Update Current Stream Entries
+    if (app->entry_prim_current && app->streams[0].image_name) {
+         // Use the active name if active is 0, else cached name
+         const char *name = (app->active_stream == 0 && app->image_name) ? app->image_name : app->streams[0].image_name;
+         if (name) gtk_editable_set_text(GTK_EDITABLE(app->entry_prim_current), name);
+    }
+
+    if (app->entry_sec_current) {
+         const char *name = (app->active_stream == 1 && app->image_name) ? app->image_name : app->streams[1].image_name;
+         if (name) gtk_editable_set_text(GTK_EDITABLE(app->entry_sec_current), name);
+         else gtk_editable_set_text(GTK_EDITABLE(app->entry_sec_current), "");
+    }
+
+    // Also re-trigger validation coloring if needed?
+    // Not strictly necessary if validation is only on text change.
+}
+
+static void
+on_prim_entry_changed (GtkEditable *editable, gpointer user_data)
+{
+    // ViewerApp *app = (ViewerApp *)user_data;
+    // Wait, currently loaded primary?
+    // Validation logic similar to sec.
+
+    const char *text = gtk_editable_get_text(editable);
+
+    gtk_widget_remove_css_class(GTK_WIDGET(editable), "entry-red");
+    gtk_widget_remove_css_class(GTK_WIDGET(editable), "entry-green");
+    // gtk_widget_remove_css_class(GTK_WIDGET(editable), "entry-blue"); // Blue is for "Loaded".
+
+    if (strlen(text) == 0) return;
+
+    // Check existence
+    IMAGE test_img;
+    if (ImageStreamIO_openIm(&test_img, text) == 0) {
+        gtk_widget_add_css_class(GTK_WIDGET(editable), "entry-green");
+        ImageStreamIO_closeIm(&test_img);
+    } else {
+        gtk_widget_add_css_class(GTK_WIDGET(editable), "entry-red");
+    }
+}
+
+static void
+on_prim_load_clicked (GtkButton *btn, gpointer user_data)
+{
+    ViewerApp *app = (ViewerApp *)user_data;
+    const char *text = gtk_editable_get_text(GTK_EDITABLE(app->entry_prim_stream));
+
+    if (strlen(text) == 0) return;
+
+    IMAGE test_img;
+    if (ImageStreamIO_openIm(&test_img, text) == 0) {
+        ImageStreamIO_closeIm(&test_img);
+
+        // If we are currently viewing Primary, update immediately
+        if (app->active_stream == 0) {
+            // Check for alias in streams[0] and clear it to prevent dangling pointer
+            if (app->streams[0].image == app->image) app->streams[0].image = NULL;
+
+            // Close current app->image (which is Primary)
+            if (app->image) {
+                ImageStreamIO_closeIm(app->image);
+                free(app->image);
+                app->image = NULL;
+            }
+            if (app->image_name) free(app->image_name);
+
+            app->image = (IMAGE*)malloc(sizeof(IMAGE));
+            ImageStreamIO_openIm(app->image, text);
+            app->image_name = strdup(text);
+
+            // Sync to streams[0] as well? `save` does it on toggle.
+            // But if we load and then click 'Display', we expect it to be there.
+            // Actually, `app->image` IS the primary when active.
+
+            app->force_redraw = TRUE;
+        } else {
+            // We are viewing Secondary. Update streams[0] in background.
+             if (app->streams[0].image) {
+                ImageStreamIO_closeIm(app->streams[0].image);
+                free(app->streams[0].image);
+                app->streams[0].image = NULL;
+            }
+            if (app->streams[0].image_name) free(app->streams[0].image_name);
+
+            app->streams[0].image = (IMAGE*)malloc(sizeof(IMAGE));
+            ImageStreamIO_openIm(app->streams[0].image, text);
+            app->streams[0].image_name = strdup(text);
+        }
+
+        update_stream_ui_state(app);
+
+        // Set Blue on input?
+        // "When loaded, the text box will turn blue."
+        gtk_widget_remove_css_class(GTK_WIDGET(app->entry_prim_stream), "entry-green");
+        gtk_widget_remove_css_class(GTK_WIDGET(app->entry_prim_stream), "entry-red");
+        // gtk_widget_add_css_class(GTK_WIDGET(app->entry_prim_stream), "entry-blue");
+        // Wait, "entry-blue" is for "Matches loaded".
+        // If I type "stream1", load it. It becomes loaded.
+        // on_prim_entry_changed should check this?
+        // Let's rely on re-triggering validation or just set it here?
+        // If user types, it goes back to Green/Red.
+        // Let's set it here.
+        // Actually, `on_sec_load_clicked` sets it.
+        // But `on_sec_entry_changed` resets it.
+
+        // I should update `on_prim_entry_changed` to check loaded status too?
+        // Yes, similar to sec.
+    }
 }
 
 static void
@@ -537,13 +680,20 @@ on_sec_load_clicked (GtkButton *btn, gpointer user_data)
     IMAGE test_img;
     if (ImageStreamIO_openIm(&test_img, text) == 0) {
         int p_w = 0, p_h = 0;
+        // Use streams[0] if available, else current image
         if (app->streams[0].image) {
             p_w = app->streams[0].image->md->size[0];
             p_h = app->streams[0].image->md->size[1];
+        } else if (app->image) {
+            p_w = app->image->md->size[0];
+            p_h = app->image->md->size[1];
         }
 
         if (test_img.md->size[0] == p_w && test_img.md->size[1] == p_h) {
             ImageStreamIO_closeIm(&test_img); // Close temporary
+
+            // If active stream is Secondary, clear app->image before freeing streams[1].image to avoid dangling pointer
+            if (app->active_stream == 1 && app->image == app->streams[1].image) app->image = NULL;
 
             // Load into streams[1]
             if (app->streams[1].image) {
@@ -558,9 +708,9 @@ on_sec_load_clicked (GtkButton *btn, gpointer user_data)
             app->streams[1].image_name = strdup(text);
 
             // Initialize defaults if not set?
-            // "Scaling and colormaps parameters should be memorized... allowed to be different."
-            // We should probably init them to defaults or copy from primary as a starting point?
-            // Let's init to current defaults.
+            // Copy defaults from current if new?
+            // For now, keep as is (copy from 0 if fresh or keep old values).
+            // Logic from previous iteration:
             app->streams[1].min_val = app->streams[0].min_val;
             app->streams[1].max_val = app->streams[0].max_val;
             app->streams[1].fixed_min = app->streams[0].fixed_min;
@@ -584,6 +734,9 @@ on_sec_load_clicked (GtkButton *btn, gpointer user_data)
                 app->image_name = strdup(app->streams[1].image_name);
                 app->force_redraw = TRUE;
             }
+
+            update_stream_ui_state(app);
+
         } else {
             ImageStreamIO_closeIm(&test_img);
             // Error feedback? Already red from 'changed' signal usually.
@@ -591,23 +744,11 @@ on_sec_load_clicked (GtkButton *btn, gpointer user_data)
     }
 }
 
-static void
-on_stream_toggle_toggled (GtkToggleButton *btn, gpointer user_data)
-{
-    ViewerApp *app = (ViewerApp *)user_data;
-    gboolean active = gtk_toggle_button_get_active(btn); // True if pressed (Secondary?)
-
-    // Let's map: Active/Pressed = Secondary (1), Inactive = Primary (0)
-    int target = active ? 1 : 0;
-
+static void switch_to_stream(ViewerApp *app, int target) {
     if (target == app->active_stream) return;
 
     // Check if secondary is loaded
-    if (target == 1 && !app->streams[1].image) {
-        // Can't switch
-        gtk_toggle_button_set_active(btn, FALSE); // Revert
-        return;
-    }
+    if (target == 1 && !app->streams[1].image) return;
 
     // Save current
     save_current_stream_state(app);
@@ -615,10 +756,58 @@ on_stream_toggle_toggled (GtkToggleButton *btn, gpointer user_data)
     // Load target
     load_stream_state(app, target);
 
-    // Update label
-    gtk_button_set_label(GTK_BUTTON(btn), target == 1 ? "Secondary" : "Primary");
+    update_stream_ui_state(app);
 
     app->force_redraw = TRUE;
+}
+
+static void
+on_prim_display_clicked (GtkButton *btn, gpointer user_data)
+{
+    ViewerApp *app = (ViewerApp *)user_data;
+    switch_to_stream(app, 0);
+}
+
+static void
+on_sec_display_clicked (GtkButton *btn, gpointer user_data)
+{
+    ViewerApp *app = (ViewerApp *)user_data;
+    switch_to_stream(app, 1);
+}
+
+static void
+on_sec_clear_clicked (GtkButton *btn, gpointer user_data)
+{
+    ViewerApp *app = (ViewerApp *)user_data;
+
+    // Stop blinking
+    if (app->blink_active) {
+        gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(app->btn_blink), FALSE);
+    }
+
+    // If viewing secondary, switch to primary
+    if (app->active_stream == 1) {
+        switch_to_stream(app, 0);
+    }
+
+    // Clear streams[1]
+    if (app->streams[1].image) {
+        ImageStreamIO_closeIm(app->streams[1].image);
+        free(app->streams[1].image);
+        app->streams[1].image = NULL;
+    }
+    if (app->streams[1].image_name) {
+        free(app->streams[1].image_name);
+        app->streams[1].image_name = NULL;
+    }
+
+    // Reset UI
+    gtk_editable_set_text(GTK_EDITABLE(app->entry_sec_stream), "");
+    gtk_widget_remove_css_class(GTK_WIDGET(app->entry_sec_stream), "entry-blue");
+    gtk_widget_remove_css_class(GTK_WIDGET(app->entry_sec_stream), "entry-green");
+    gtk_widget_remove_css_class(GTK_WIDGET(app->entry_sec_stream), "entry-red");
+
+    update_stream_ui_state(app);
 }
 
 static gboolean blink_timer_func(gpointer user_data) {
@@ -632,17 +821,7 @@ static gboolean blink_timer_func(gpointer user_data) {
     if (target == 1 && !app->streams[1].image) target = 0;
 
     if (target != app->active_stream) {
-        // Toggle
-        // We need to update the Toggle Button state too to keep it in sync?
-        // Or just update the view?
-        // Updating the button triggers the signal, which calls `on_stream_toggle_toggled`.
-        // So we can just set the button state.
-
-        // Block signal to prevent recursion if needed? No, signal is fine, it does the logic.
-        // But `on_stream_toggle_toggled` saves state.
-        // If we blink rapidly, saving/loading state is fine.
-
-        gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(app->btn_stream_toggle), target == 1);
+        switch_to_stream(app, target);
     }
 
     return G_SOURCE_CONTINUE;
@@ -4017,6 +4196,7 @@ update_display (gpointer user_data)
                      (int)app->image->md->size[0], (int)app->image->md->size[1]);
             gtk_window_set_title(win, title);
         }
+        update_stream_ui_state(app);
     }
 
     // FPS Estimation
@@ -4192,40 +4372,90 @@ activate (GtkApplication *app,
 
     g_signal_connect(popover_rms, "map", G_CALLBACK(refresh_rms_popover), viewer);
 
-    // Group: Dual View (Secondary Stream)
-    GtkWidget *vbox_dual = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
-    gtk_box_append(GTK_BOX(box_view), vbox_dual);
+    // Group: Streams
+    GtkWidget *vbox_streams = gtk_box_new(GTK_ORIENTATION_VERTICAL, 4);
+    gtk_box_append(GTK_BOX(box_view), vbox_streams);
 
-    GtkWidget *hbox_sec_load = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 2);
-    gtk_box_append(GTK_BOX(vbox_dual), hbox_sec_load);
+    // Row 1: Primary Stream
+    GtkWidget *hbox_prim = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 4);
+    gtk_box_append(GTK_BOX(vbox_streams), hbox_prim);
+
+    viewer->entry_prim_stream = gtk_entry_new();
+    gtk_entry_set_placeholder_text(GTK_ENTRY(viewer->entry_prim_stream), "Primary");
+    gtk_widget_set_size_request(viewer->entry_prim_stream, 100, -1);
+    g_signal_connect(viewer->entry_prim_stream, "changed", G_CALLBACK(on_prim_entry_changed), viewer);
+    g_signal_connect(viewer->entry_prim_stream, "activate", G_CALLBACK(on_prim_load_clicked), viewer);
+    gtk_box_append(GTK_BOX(hbox_prim), viewer->entry_prim_stream);
+
+    viewer->btn_prim_load = gtk_button_new_with_label("Load");
+    g_signal_connect(viewer->btn_prim_load, "clicked", G_CALLBACK(on_prim_load_clicked), viewer);
+    gtk_box_append(GTK_BOX(hbox_prim), viewer->btn_prim_load);
+
+    viewer->entry_prim_current = gtk_entry_new();
+    gtk_editable_set_editable(GTK_EDITABLE(viewer->entry_prim_current), FALSE);
+    gtk_widget_set_can_focus(viewer->entry_prim_current, FALSE);
+    gtk_widget_set_size_request(viewer->entry_prim_current, 100, -1);
+    gtk_box_append(GTK_BOX(hbox_prim), viewer->entry_prim_current);
+
+    viewer->btn_prim_display = gtk_button_new_with_label("Display");
+    g_signal_connect(viewer->btn_prim_display, "clicked", G_CALLBACK(on_prim_display_clicked), viewer);
+    gtk_box_append(GTK_BOX(hbox_prim), viewer->btn_prim_display);
+
+    // Row 2: Secondary Stream
+    GtkWidget *hbox_sec = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 4);
+    gtk_box_append(GTK_BOX(vbox_streams), hbox_sec);
 
     viewer->entry_sec_stream = gtk_entry_new();
-    gtk_entry_set_placeholder_text(GTK_ENTRY(viewer->entry_sec_stream), "Secondary stream");
-    gtk_widget_set_size_request(viewer->entry_sec_stream, 120, -1);
+    gtk_entry_set_placeholder_text(GTK_ENTRY(viewer->entry_sec_stream), "Secondary");
+    gtk_widget_set_size_request(viewer->entry_sec_stream, 100, -1);
     g_signal_connect(viewer->entry_sec_stream, "changed", G_CALLBACK(on_sec_entry_changed), viewer);
-    g_signal_connect(viewer->entry_sec_stream, "activate", G_CALLBACK(on_sec_load_clicked), viewer); // Allow Enter to load
-    gtk_box_append(GTK_BOX(hbox_sec_load), viewer->entry_sec_stream);
+    g_signal_connect(viewer->entry_sec_stream, "activate", G_CALLBACK(on_sec_load_clicked), viewer);
+    gtk_box_append(GTK_BOX(hbox_sec), viewer->entry_sec_stream);
 
     viewer->btn_sec_load = gtk_button_new_with_label("Load");
     g_signal_connect(viewer->btn_sec_load, "clicked", G_CALLBACK(on_sec_load_clicked), viewer);
-    gtk_box_append(GTK_BOX(hbox_sec_load), viewer->btn_sec_load);
+    gtk_box_append(GTK_BOX(hbox_sec), viewer->btn_sec_load);
 
-    GtkWidget *hbox_dual_ctrl = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 2);
-    gtk_box_append(GTK_BOX(vbox_dual), hbox_dual_ctrl);
+    viewer->entry_sec_current = gtk_entry_new();
+    gtk_editable_set_editable(GTK_EDITABLE(viewer->entry_sec_current), FALSE);
+    gtk_widget_set_can_focus(viewer->entry_sec_current, FALSE);
+    gtk_widget_set_size_request(viewer->entry_sec_current, 100, -1);
+    gtk_box_append(GTK_BOX(hbox_sec), viewer->entry_sec_current);
 
-    viewer->btn_stream_toggle = gtk_toggle_button_new_with_label("Primary");
-    g_signal_connect(viewer->btn_stream_toggle, "toggled", G_CALLBACK(on_stream_toggle_toggled), viewer);
-    gtk_box_append(GTK_BOX(hbox_dual_ctrl), viewer->btn_stream_toggle);
+    viewer->btn_sec_display = gtk_button_new_with_label("Display");
+    g_signal_connect(viewer->btn_sec_display, "clicked", G_CALLBACK(on_sec_display_clicked), viewer);
+    gtk_box_append(GTK_BOX(hbox_sec), viewer->btn_sec_display);
+
+    // Row 3: Controls
+    GtkWidget *hbox_ctrl = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 4);
+    gtk_box_append(GTK_BOX(vbox_streams), hbox_ctrl);
+
+    viewer->btn_sec_clear = gtk_button_new_with_label("Clear Sec");
+    g_signal_connect(viewer->btn_sec_clear, "clicked", G_CALLBACK(on_sec_clear_clicked), viewer);
+    gtk_box_append(GTK_BOX(hbox_ctrl), viewer->btn_sec_clear);
 
     viewer->btn_blink = gtk_toggle_button_new_with_label("Blink");
+    // Reuse auto-scale-red for green/red toggle? No, we have btn-green for display.
+    // Blink button: "Becomes green if activated".
+    // I can reuse "auto-scale-red" (which is red) or make a "blink-green" class.
+    // I made "btn-green" which sets background.
+    // Toggle button active state + CSS?
+    // GTK4 toggle button checked state: `button:checked`
+    // I can add a class "toggle-green" and define `.toggle-green:checked { background: ... }`.
+    // I'll reuse "auto-scale-red" style but with green?
+    // The provider already has `.btn-green`. That applies to any widget.
+    // If I add `btn-green` to toggle button when active?
+    // Or just define `.toggle-green:checked` in the CSS provider.
+    // I'll add "toggle-green" class to the button and define it.
+    gtk_widget_add_css_class(viewer->btn_blink, "toggle-green");
     g_signal_connect(viewer->btn_blink, "toggled", G_CALLBACK(on_blink_toggled), viewer);
-    gtk_box_append(GTK_BOX(hbox_dual_ctrl), viewer->btn_blink);
+    gtk_box_append(GTK_BOX(hbox_ctrl), viewer->btn_blink);
 
     const char *blink_opts[] = {"1/8s", "1/4s", "1/2s", "1s", "2s", "4s", "8s", NULL};
     viewer->dropdown_blink_time = gtk_drop_down_new_from_strings(blink_opts);
     gtk_drop_down_set_selected(GTK_DROP_DOWN(viewer->dropdown_blink_time), 3); // 1s
     g_signal_connect(viewer->dropdown_blink_time, "notify::selected", G_CALLBACK(on_blink_time_changed), viewer);
-    gtk_box_append(GTK_BOX(hbox_dual_ctrl), viewer->dropdown_blink_time);
+    gtk_box_append(GTK_BOX(hbox_ctrl), viewer->dropdown_blink_time);
 
     gtk_box_append(GTK_BOX(box_view), gtk_separator_new(GTK_ORIENTATION_VERTICAL));
 
@@ -4336,7 +4566,9 @@ activate (GtkApplication *app,
         ".tbin-selected { background: #3584e4; color: white; font-weight: bold; }"
         ".entry-red { background: #ffcccc; color: black; }"
         ".entry-green { background: #ccffcc; color: black; }"
-        ".entry-blue { background: #ccccff; color: black; }");
+        ".entry-blue { background: #ccccff; color: black; }"
+        ".btn-green { background: #00cc00; color: white; border-color: #006600; }"
+        ".toggle-green:checked { background: #00cc00; color: white; border-color: #006600; }");
     gtk_style_context_add_provider_for_display(gdk_display_get_default(),
                                                GTK_STYLE_PROVIDER(provider),
                                                GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
@@ -4920,6 +5152,7 @@ activate (GtkApplication *app,
     update_spin_steps(viewer);
     update_thresh_spin_steps(viewer);
 
+    update_stream_ui_state(viewer);
     gtk_window_present (GTK_WINDOW (window));
 }
 
