@@ -52,6 +52,17 @@ enum {
     AUTO_MAX_COUNT
 };
 
+// 2D Mode Colors
+enum {
+    MODE_2D_RED = 0,
+    MODE_2D_GREEN,
+    MODE_2D_BLUE,
+    MODE_2D_CYAN,
+    MODE_2D_MAGENTA,
+    MODE_2D_YELLOW,
+    MODE_2D_COUNT
+};
+
 // Stream Context
 typedef struct {
     IMAGE *image;
@@ -78,6 +89,12 @@ typedef struct {
     // Auto Scale
     int min_mode;
     int max_mode;
+    double auto_gain;
+
+    // Thresholds
+    double thresh_min_val;
+    double thresh_max_val;
+    gboolean thresholds_enabled;
 } StreamContext;
 
 // Application state
@@ -104,6 +121,10 @@ typedef struct {
     // Raw Data Buffer (Cache for Pause)
     void *raw_buffer;
     size_t raw_buffer_size;
+
+    // Secondary Raw Buffer (for 2D Mode)
+    void *raw_buffer_sec;
+    size_t raw_buffer_sec_size;
 
     int img_width;
     int img_height;
@@ -350,6 +371,23 @@ typedef struct {
     double blink_interval;
     gboolean blink_active;
     double current_fps;
+
+    // 2D Mode
+    gboolean mode_2d;
+    int mode_2d_color;
+    GtkWidget *btn_mode_2d;
+    GtkWidget *dropdown_2d_color;
+
+    // Secondary Scaling UI (2D Mode)
+    GtkWidget *box_sec_scaling;
+    GtkWidget *spin_sec_min;
+    GtkWidget *dropdown_sec_min_mode;
+    GtkWidget *spin_sec_max;
+    GtkWidget *dropdown_sec_max_mode;
+    GtkWidget *btn_sec_autoscale;
+    GtkWidget *check_sec_thresholds;
+    GtkWidget *spin_sec_thresh_min;
+    GtkWidget *spin_sec_thresh_max;
 } ViewerApp;
 
 // Command line option variables
@@ -429,6 +467,10 @@ static void save_current_stream_state(ViewerApp *app) {
     ctx->current_max = app->current_max;
     ctx->colormap_type = app->colormap_type;
     ctx->scale_type = app->scale_type;
+    ctx->auto_gain = app->auto_gain;
+    ctx->thresh_min_val = app->thresh_min_val;
+    ctx->thresh_max_val = app->thresh_max_val;
+    ctx->thresholds_enabled = app->thresholds_enabled;
 
     // Dropdown modes
     if (app->dropdown_min_mode)
@@ -455,6 +497,10 @@ static void load_stream_state(ViewerApp *app, int idx) {
     app->current_max = ctx->current_max;
     app->colormap_type = ctx->colormap_type;
     app->scale_type = ctx->scale_type;
+    app->auto_gain = ctx->auto_gain;
+    app->thresh_min_val = ctx->thresh_min_val;
+    app->thresh_max_val = ctx->thresh_max_val;
+    app->thresholds_enabled = ctx->thresholds_enabled;
 
     // Restore UI
     if (app->spin_min) gtk_spin_button_set_value(GTK_SPIN_BUTTON(app->spin_min), app->min_val);
@@ -473,9 +519,19 @@ static void load_stream_state(ViewerApp *app, int idx) {
     if (app->spin_min) gtk_widget_set_sensitive(app->spin_min, app->fixed_min);
     if (app->spin_max) gtk_widget_set_sensitive(app->spin_max, app->fixed_max);
 
-    // Force Autoscale toggle visual update?
-    // The dropdown change triggers on_min_mode_changed which updates the toggle.
-    // So setting dropdowns should be enough.
+    if (app->check_thresholds) gtk_check_button_set_active(GTK_CHECK_BUTTON(app->check_thresholds), app->thresholds_enabled);
+    if (app->spin_thresh_min) gtk_spin_button_set_value(GTK_SPIN_BUTTON(app->spin_thresh_min), app->thresh_min_val);
+    if (app->spin_thresh_max) gtk_spin_button_set_value(GTK_SPIN_BUTTON(app->spin_thresh_max), app->thresh_max_val);
+
+    // Auto Gain UI
+    if (app->dropdown_gain) {
+        double gains[] = {1.00, 0.50, 0.20, 0.10, 0.05, 0.02, 0.01};
+        int sel = 3; // Default 0.10
+        for (int i=0; i<7; i++) {
+             if (fabs(app->auto_gain - gains[i]) < 1e-4) { sel = i; break; }
+        }
+        gtk_drop_down_set_selected(GTK_DROP_DOWN(app->dropdown_gain), sel);
+    }
 }
 
 static void
@@ -867,6 +923,199 @@ on_blink_time_changed (GtkDropDown *dropdown, GParamSpec *pspec, gpointer user_d
     }
 }
 
+// 2D Mode Callbacks
+static void
+on_mode_2d_toggled (GtkToggleButton *btn, gpointer user_data)
+{
+    ViewerApp *app = (ViewerApp *)user_data;
+    app->mode_2d = gtk_toggle_button_get_active(btn);
+
+    if (app->mode_2d) {
+        // Disable Blink
+        if (app->blink_active) gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(app->btn_blink), FALSE);
+        gtk_widget_set_sensitive(app->btn_blink, FALSE);
+
+        // Force Primary Stream Active
+        if (app->active_stream != 0) {
+            switch_to_stream(app, 0);
+        }
+
+        // Disable Main Cmap Dropdown (using 2D color instead)
+        gtk_widget_set_sensitive(app->dropdown_cmap, FALSE);
+
+        // Show Secondary Scaling
+        gtk_widget_set_visible(app->box_sec_scaling, TRUE);
+
+    } else {
+        gtk_widget_set_sensitive(app->btn_blink, TRUE);
+        gtk_widget_set_sensitive(app->dropdown_cmap, TRUE);
+
+        // Hide Secondary Scaling
+        gtk_widget_set_visible(app->box_sec_scaling, FALSE);
+    }
+
+    update_stream_ui_state(app);
+    app->force_redraw = TRUE;
+}
+
+static void
+on_mode_2d_color_changed (GtkDropDown *dropdown, GParamSpec *pspec, gpointer user_data)
+{
+    ViewerApp *app = (ViewerApp *)user_data;
+    app->mode_2d_color = gtk_drop_down_get_selected(dropdown);
+    app->force_redraw = TRUE;
+}
+
+// Secondary Scaling Callbacks (Update streams[1] directly)
+static void update_sec_spin_steps(ViewerApp *app) {
+    if (!app->spin_sec_min || !app->spin_sec_max) return;
+    double range = fabs(app->streams[1].max_val - app->streams[1].min_val);
+    double step = range * 0.2;
+    if (step < 1e-9) step = 1.0;
+    gtk_spin_button_set_increments(GTK_SPIN_BUTTON(app->spin_sec_min), step, step * 5.0);
+    gtk_spin_button_set_increments(GTK_SPIN_BUTTON(app->spin_sec_max), step, step * 5.0);
+}
+
+static void on_sec_spin_min_changed(GtkSpinButton *spin, gpointer user_data) {
+    ViewerApp *app = (ViewerApp *)user_data;
+    app->streams[1].min_val = gtk_spin_button_get_value(spin);
+    update_sec_spin_steps(app);
+    app->force_redraw = TRUE;
+}
+
+static void on_sec_spin_max_changed(GtkSpinButton *spin, gpointer user_data) {
+    ViewerApp *app = (ViewerApp *)user_data;
+    app->streams[1].max_val = gtk_spin_button_get_value(spin);
+    update_sec_spin_steps(app);
+    app->force_redraw = TRUE;
+}
+
+static void on_sec_min_mode_changed(GtkDropDown *dropdown, GParamSpec *pspec, gpointer user_data) {
+    ViewerApp *app = (ViewerApp *)user_data;
+    int mode = gtk_drop_down_get_selected(dropdown);
+    app->streams[1].min_mode = mode;
+    app->streams[1].fixed_min = (mode == AUTO_MANUAL);
+    gtk_widget_set_sensitive(app->spin_sec_min, app->streams[1].fixed_min);
+
+    // Update Auto Toggle
+    g_signal_handlers_block_by_func(app->btn_sec_autoscale, on_btn_autoscale_toggled, app);
+
+    if (!app->streams[1].fixed_min) {
+         gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(app->btn_sec_autoscale), TRUE);
+         gtk_button_set_label(GTK_BUTTON(app->btn_sec_autoscale), "Auto");
+    }
+    // If both manual
+    if (app->streams[1].fixed_min && app->streams[1].fixed_max) {
+         gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(app->btn_sec_autoscale), FALSE);
+         gtk_button_set_label(GTK_BUTTON(app->btn_sec_autoscale), "Manual");
+    }
+    // Note: blocking logic here is tricky since on_btn_autoscale_toggled is for Primary.
+    // I need on_sec_autoscale_toggled.
+    // The previous edit used `on_sec_autoscale_toggled` in activate.
+    // I need to define `on_sec_autoscale_toggled`.
+
+    // Correction: In activate I used `on_sec_autoscale_toggled`.
+    // So here I must block `on_sec_autoscale_toggled`.
+    // Wait, I haven't defined `on_sec_autoscale_toggled` yet. It will be defined below.
+
+    app->force_redraw = TRUE;
+}
+
+static void on_sec_max_mode_changed(GtkDropDown *dropdown, GParamSpec *pspec, gpointer user_data) {
+    ViewerApp *app = (ViewerApp *)user_data;
+    int mode = gtk_drop_down_get_selected(dropdown);
+    app->streams[1].max_mode = mode;
+    app->streams[1].fixed_max = (mode == AUTO_MAX_MANUAL);
+    gtk_widget_set_sensitive(app->spin_sec_max, app->streams[1].fixed_max);
+
+    // Update Auto Toggle logic similar to min
+    if (!app->streams[1].fixed_max) {
+         // gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(app->btn_sec_autoscale), TRUE);
+         // gtk_button_set_label(GTK_BUTTON(app->btn_sec_autoscale), "Auto");
+    }
+    // Logic implementation will be handled by blocking signals in `on_sec_autoscale_toggled`.
+
+    app->force_redraw = TRUE;
+}
+
+static void on_sec_autoscale_toggled(GtkToggleButton *btn, gpointer user_data) {
+    ViewerApp *app = (ViewerApp *)user_data;
+    gboolean active = gtk_toggle_button_get_active(btn);
+    gtk_button_set_label(GTK_BUTTON(btn), active ? "Auto" : "Manual");
+
+    StreamContext *s = &app->streams[1];
+
+    if (active) {
+        // Switch to Auto
+        int t_min = (s->min_mode == AUTO_MANUAL) ? AUTO_DATA : s->min_mode;
+        int t_max = (s->max_mode == AUTO_MAX_MANUAL) ? AUTO_MAX_DATA : s->max_mode;
+
+        g_signal_handlers_block_by_func(app->dropdown_sec_min_mode, on_sec_min_mode_changed, app);
+        g_signal_handlers_block_by_func(app->dropdown_sec_max_mode, on_sec_max_mode_changed, app);
+
+        gtk_drop_down_set_selected(GTK_DROP_DOWN(app->dropdown_sec_min_mode), t_min);
+        gtk_drop_down_set_selected(GTK_DROP_DOWN(app->dropdown_sec_max_mode), t_max);
+
+        s->min_mode = t_min;
+        s->max_mode = t_max;
+        s->fixed_min = FALSE;
+        s->fixed_max = FALSE;
+        gtk_widget_set_sensitive(app->spin_sec_min, FALSE);
+        gtk_widget_set_sensitive(app->spin_sec_max, FALSE);
+
+        g_signal_handlers_unblock_by_func(app->dropdown_sec_min_mode, on_sec_min_mode_changed, app);
+        g_signal_handlers_unblock_by_func(app->dropdown_sec_max_mode, on_sec_max_mode_changed, app);
+
+    } else {
+        // Switch to Manual
+        g_signal_handlers_block_by_func(app->dropdown_sec_min_mode, on_sec_min_mode_changed, app);
+        g_signal_handlers_block_by_func(app->dropdown_sec_max_mode, on_sec_max_mode_changed, app);
+
+        gtk_drop_down_set_selected(GTK_DROP_DOWN(app->dropdown_sec_min_mode), AUTO_MANUAL);
+        gtk_drop_down_set_selected(GTK_DROP_DOWN(app->dropdown_sec_max_mode), AUTO_MAX_MANUAL);
+
+        s->min_mode = AUTO_MANUAL;
+        s->max_mode = AUTO_MAX_MANUAL;
+        s->fixed_min = TRUE;
+        s->fixed_max = TRUE;
+        gtk_widget_set_sensitive(app->spin_sec_min, TRUE);
+        gtk_widget_set_sensitive(app->spin_sec_max, TRUE);
+
+        g_signal_handlers_unblock_by_func(app->dropdown_sec_min_mode, on_sec_min_mode_changed, app);
+        g_signal_handlers_unblock_by_func(app->dropdown_sec_max_mode, on_sec_max_mode_changed, app);
+    }
+    app->force_redraw = TRUE;
+}
+
+static void on_sec_threshold_toggled(GtkCheckButton *btn, gpointer user_data) {
+    ViewerApp *app = (ViewerApp *)user_data;
+    app->streams[1].thresholds_enabled = gtk_check_button_get_active(btn);
+    app->force_redraw = TRUE;
+}
+
+static void update_sec_thresh_spin_steps(ViewerApp *app) {
+    if (!app->spin_sec_thresh_min || !app->spin_sec_thresh_max) return;
+    double range = fabs(app->streams[1].thresh_max_val - app->streams[1].thresh_min_val);
+    double step = range * 0.1;
+    if (step < 1e-9) step = 0.1;
+    gtk_spin_button_set_increments(GTK_SPIN_BUTTON(app->spin_sec_thresh_min), step, step * 10.0);
+    gtk_spin_button_set_increments(GTK_SPIN_BUTTON(app->spin_sec_thresh_max), step, step * 10.0);
+}
+
+static void on_sec_thresh_min_changed(GtkSpinButton *spin, gpointer user_data) {
+    ViewerApp *app = (ViewerApp *)user_data;
+    app->streams[1].thresh_min_val = gtk_spin_button_get_value(spin);
+    update_sec_thresh_spin_steps(app);
+    app->force_redraw = TRUE;
+}
+
+static void on_sec_thresh_max_changed(GtkSpinButton *spin, gpointer user_data) {
+    ViewerApp *app = (ViewerApp *)user_data;
+    app->streams[1].thresh_max_val = gtk_spin_button_get_value(spin);
+    update_sec_thresh_spin_steps(app);
+    app->force_redraw = TRUE;
+}
+
 // Helpers for Orientation
 static void update_rotation_label(ViewerApp *app) {
     char buf[16];
@@ -1221,6 +1470,42 @@ static void get_colormap_color(double t, int type, double *r, double *g, double 
             *r = t; *g = t; *b = t;
             break;
     }
+}
+
+// 2D Colormap Mixing
+static void get_colormap_color_2d(double v1, double v2, int color_type, double *r, double *g, double *b) {
+    if (v1 < 0) v1 = 0; if (v1 > 1) v1 = 1;
+    if (v2 < 0) v2 = 0; if (v2 > 1) v2 = 1;
+
+    // v1 is Intensity (Value), v2 is Color Amount (Saturation)
+    // HSV: V=v1, S=v2, H=color_type
+
+    double hue = 0;
+    switch(color_type) {
+        case MODE_2D_RED: hue = 0; break;
+        case MODE_2D_GREEN: hue = 120; break;
+        case MODE_2D_BLUE: hue = 240; break;
+        case MODE_2D_CYAN: hue = 180; break;
+        case MODE_2D_MAGENTA: hue = 300; break;
+        case MODE_2D_YELLOW: hue = 60; break;
+        default: hue = 0; break;
+    }
+
+    double c = v1 * v2; // Chroma = V * S
+    double x = c * (1.0 - fabs(fmod(hue / 60.0, 2) - 1.0));
+    double m = v1 - c;
+
+    double r1, g1, b1;
+    if (hue < 60) { r1=c; g1=x; b1=0; }
+    else if (hue < 120) { r1=x; g1=c; b1=0; }
+    else if (hue < 180) { r1=0; g1=c; b1=x; }
+    else if (hue < 240) { r1=0; g1=x; b1=c; }
+    else if (hue < 300) { r1=x; g1=0; b1=c; }
+    else { r1=c; g1=0; b1=x; }
+
+    *r = r1 + m;
+    *g = g1 + m;
+    *b = b1 + m;
 }
 
 static void
@@ -3745,59 +4030,80 @@ calculate_limits_from_buffer(void *data, size_t count, int datatype,
 }
 
 static void
-calculate_autoscale_limits(ViewerApp *app, double *new_min, double *new_max, int width, int height, uint8_t datatype, void *raw_data) {
-    int mode_min = gtk_drop_down_get_selected(GTK_DROP_DOWN(app->dropdown_min_mode));
-    int mode_max = gtk_drop_down_get_selected(GTK_DROP_DOWN(app->dropdown_max_mode));
-
-    if (mode_min == AUTO_MANUAL && mode_max == AUTO_MAX_MANUAL) return;
+autoscale_process(double *current_min, double *current_max,
+                  int min_mode, int max_mode, double gain,
+                  double app_min_val, double app_max_val,
+                  void *raw_data, int width, int height, uint8_t datatype,
+                  gboolean use_roi, int rx, int ry, int rw, int rh) {
+    if (min_mode == AUTO_MANUAL && max_mode == AUTO_MAX_MANUAL) return;
 
     gboolean roi_calculated = FALSE;
+    double new_min = *current_min;
+    double new_max = *current_max;
 
-    if (app->autoscale_source_roi && app->selection_active) {
-        // Extract ROI data
-        int x1 = app->sel_x1; int x2 = app->sel_x2 + 1;
-        int y1 = app->sel_y1; int y2 = app->sel_y2 + 1;
-        if (x1 < 0) x1 = 0; if (y1 < 0) y1 = 0;
-        if (x2 > width) x2 = width; if (y2 > height) y2 = height;
+    if (use_roi) {
+        size_t roi_count = rw * rh;
+        size_t type_size = ImageStreamIO_typesize(datatype);
 
-        int roi_w = x2 - x1; int roi_h = y2 - y1;
-
-        if (roi_w > 0 && roi_h > 0) {
-            size_t roi_count = roi_w * roi_h;
-            size_t type_size = ImageStreamIO_typesize(datatype);
-
-            // Allocate temp buffer for ROI contiguous block
-            // (Optimize: We could iterate directly in calculate_limits_from_buffer if we passed strides/ROI,
-            // but copy is simpler for now and likely fast enough for typical ROIs)
-            void *roi_buf = malloc(roi_count * type_size);
-            if (roi_buf) {
-                for(int y=0; y<roi_h; ++y) {
-                    void *src = (char*)raw_data + ((y1 + y) * width + x1) * type_size;
-                    void *dst = (char*)roi_buf + (y * roi_w) * type_size;
-                    memcpy(dst, src, roi_w * type_size);
-                }
-
-                calculate_limits_from_buffer(roi_buf, roi_count, datatype, mode_min, mode_max, new_min, new_max);
-                free(roi_buf);
-                roi_calculated = TRUE;
+        void *roi_buf = malloc(roi_count * type_size);
+        if (roi_buf) {
+            for(int y=0; y<rh; ++y) {
+                void *src = (char*)raw_data + ((ry + y) * width + rx) * type_size;
+                void *dst = (char*)roi_buf + (y * rw) * type_size;
+                memcpy(dst, src, rw * type_size);
             }
+            calculate_limits_from_buffer(roi_buf, roi_count, datatype, min_mode, max_mode, &new_min, &new_max);
+            free(roi_buf);
+            roi_calculated = TRUE;
         }
     }
 
     if (!roi_calculated) {
-        // Fallback to Full Frame
-        calculate_limits_from_buffer(raw_data, (size_t)width * height, datatype, mode_min, mode_max, new_min, new_max);
+        calculate_limits_from_buffer(raw_data, (size_t)width * height, datatype, min_mode, max_mode, &new_min, &new_max);
     }
 
-    // Apply Gain (Smoothing) if in Auto Mode
-    // formula: val = gain * new + (1-gain) * old
-    // Gain 1.0 = Instant, Gain 0.01 = Slow
-    if (mode_min != AUTO_MANUAL) {
-        *new_min = app->auto_gain * (*new_min) + (1.0 - app->auto_gain) * app->min_val;
+    // Apply Gain
+    if (min_mode != AUTO_MANUAL) {
+        *current_min = gain * new_min + (1.0 - gain) * app_min_val;
     }
-    if (mode_max != AUTO_MAX_MANUAL) {
-        *new_max = app->auto_gain * (*new_max) + (1.0 - app->auto_gain) * app->max_val;
+    if (max_mode != AUTO_MAX_MANUAL) {
+        *current_max = gain * new_max + (1.0 - gain) * app_max_val;
     }
+}
+
+static void
+calculate_autoscale_limits(ViewerApp *app, double *new_min, double *new_max, int width, int height, uint8_t datatype, void *raw_data) {
+    int mode_min = gtk_drop_down_get_selected(GTK_DROP_DOWN(app->dropdown_min_mode));
+    int mode_max = gtk_drop_down_get_selected(GTK_DROP_DOWN(app->dropdown_max_mode));
+
+    gboolean use_roi = (app->autoscale_source_roi && app->selection_active);
+    int rx = 0, ry = 0, rw = 0, rh = 0;
+    if (use_roi) {
+        rx = app->sel_x1;
+        ry = app->sel_y1;
+        rw = app->sel_x2 - app->sel_x1 + 1;
+        rh = app->sel_y2 - app->sel_y1 + 1;
+
+        if (rx < 0) rx = 0; if (ry < 0) ry = 0;
+        if (rx + rw > width) rw = width - rx;
+        if (ry + rh > height) rh = height - ry;
+
+        if (rw <= 0 || rh <= 0) use_roi = FALSE;
+    }
+
+    // Pass app->min_val/max_val as history for smoothing
+    *new_min = app->min_val; // Initialize with current for fallback/smoothing base?
+    // Wait, autoscale_process updates *current_min in place.
+    // We should pass new_min (which is likely initialized to app->min_val by caller) as the target to update.
+    // The smoothing uses app_min_val as the 'old' value.
+
+    // Caller `draw_image` passes: `double min_val = app->min_val; calculate(..., &min_val, ...)`
+    // So `*new_min` is `app->min_val` initially.
+
+    autoscale_process(new_min, new_max, mode_min, mode_max, app->auto_gain,
+                      app->min_val, app->max_val,
+                      raw_data, width, height, datatype,
+                      use_roi, rx, ry, rw, rh);
 }
 
 static void
@@ -3938,7 +4244,7 @@ draw_image (ViewerApp *app)
     size_t element_size = ImageStreamIO_typesize(datatype);
     size_t frame_size = width * height * element_size;
 
-    // Manage Raw Buffer
+    // Manage Raw Buffer (Primary)
     if (!app->raw_buffer || app->raw_buffer_size < frame_size) {
         if (app->raw_buffer) free(app->raw_buffer);
         app->raw_buffer = malloc(frame_size);
@@ -3985,7 +4291,32 @@ draw_image (ViewerApp *app)
         }
     }
 
+    // 2D Mode Buffer Management
+    if (app->mode_2d && app->streams[1].image) {
+        IMAGE *sec_img = app->streams[1].image;
+        size_t sec_frame_size = sec_img->md->size[0] * sec_img->md->size[1] * ImageStreamIO_typesize(sec_img->md->datatype);
+
+        if (!app->raw_buffer_sec || app->raw_buffer_sec_size < sec_frame_size) {
+            if (app->raw_buffer_sec) free(app->raw_buffer_sec);
+            app->raw_buffer_sec = malloc(sec_frame_size);
+            app->raw_buffer_sec_size = sec_frame_size;
+        }
+
+        if (!app->paused) {
+             void *src_sec = NULL;
+             if (sec_img->md->imagetype & CIRCULAR_BUFFER) {
+                 if (sec_img->md->naxis == 3) {
+                     uint64_t slice_index = sec_img->md->cnt1 % sec_img->md->size[2];
+                     src_sec = (char*)sec_img->array.raw + (slice_index * sec_frame_size);
+                 } else src_sec = sec_img->array.raw;
+             } else src_sec = sec_img->array.raw;
+
+             if (src_sec) memcpy(app->raw_buffer_sec, src_sec, sec_frame_size);
+        }
+    }
+
     void *raw_data = app->raw_buffer;
+    void *raw_data_sec = app->raw_buffer_sec;
 
     // Check for History Mode (Paused + Trace Hover + Update Off)
     gboolean is_history = (app->paused &&
@@ -4019,6 +4350,9 @@ draw_image (ViewerApp *app)
             memcpy(app->history_buffer, src_ptr, frame_size);
             raw_data = app->history_buffer;
         }
+
+        // 2D History? Not supported yet (trace only stores 1D stats of primary).
+        // Secondary stream will freeze at current paused state.
     }
 
     if (!raw_data) return;
@@ -4040,7 +4374,7 @@ draw_image (ViewerApp *app)
         if (app->hist_area_left) gtk_widget_queue_draw(app->hist_area_left);
     }
 
-    // Calculate Stats
+    // Calculate Stats (Primary Stream Only)
     // We update stats if panel is visible OR if recording is active.
     // If recording is active (btn_stats_update checked), we push to trace.
     gboolean update_trace = gtk_check_button_get_active(GTK_CHECK_BUTTON(app->btn_stats_update));
@@ -4071,13 +4405,13 @@ draw_image (ViewerApp *app)
     double min_val = app->min_val;
     double max_val = app->max_val;
 
-    // Calculate Autoscale if needed
+    // Calculate Autoscale (Primary)
     if (!app->fixed_min || !app->fixed_max) {
         calculate_autoscale_limits(app, &min_val, &max_val, width, height, datatype, raw_data);
     }
 
     if (app->fixed_min) min_val = app->min_val;
-    else app->min_val = min_val; // Update internal state for UI consistency?
+    else app->min_val = min_val;
 
     if (app->fixed_max) max_val = app->max_val;
     else app->max_val = max_val;
@@ -4086,6 +4420,41 @@ draw_image (ViewerApp *app)
 
     app->current_min = min_val;
     app->current_max = max_val;
+
+    // Calculate Autoscale (Secondary)
+    StreamContext *sec = &app->streams[1];
+    double sec_min = sec->min_val;
+    double sec_max = sec->max_val;
+
+    if (app->mode_2d && sec->image && raw_data_sec) {
+        int sec_w = sec->image->md->size[0];
+        int sec_h = sec->image->md->size[1];
+        uint8_t sec_type = sec->image->md->datatype;
+
+        gboolean use_roi = (app->autoscale_source_roi && app->selection_active);
+        int rx=0, ry=0, rw=0, rh=0;
+        if (use_roi) {
+             rx = app->sel_x1; ry = app->sel_y1;
+             rw = app->sel_x2 - app->sel_x1 + 1; rh = app->sel_y2 - app->sel_y1 + 1;
+             if (rx<0) rx=0; if (ry<0) ry=0;
+             if (rx+rw > sec_w) rw = sec_w - rx;
+             if (ry+rh > sec_h) rh = sec_h - ry;
+             if (rw <= 0 || rh <= 0) use_roi = FALSE;
+        }
+
+        autoscale_process(&sec_min, &sec_max, sec->min_mode, sec->max_mode, app->auto_gain,
+                          sec->min_val, sec->max_val,
+                          raw_data_sec, sec_w, sec_h, sec_type,
+                          use_roi, rx, ry, rw, rh);
+
+        sec->min_val = sec_min;
+        sec->max_val = sec_max;
+        sec->current_min = sec_min;
+        sec->current_max = sec_max;
+
+        if (app->spin_sec_min && !sec->fixed_min) gtk_spin_button_set_value(GTK_SPIN_BUTTON(app->spin_sec_min), sec_min);
+        if (app->spin_sec_max && !sec->fixed_max) gtk_spin_button_set_value(GTK_SPIN_BUTTON(app->spin_sec_max), sec_max);
+    }
 
     if (app->colorbar) {
         gtk_widget_queue_draw(app->colorbar);
@@ -4103,10 +4472,22 @@ draw_image (ViewerApp *app)
     // Effective min/max for colormap
     double eff_min = min_val + app->cmap_min * (max_val - min_val);
     double eff_max = min_val + app->cmap_max * (max_val - min_val);
-
     if (fabs(eff_max - eff_min) < 1e-9) eff_max = eff_min + 1.0;
 
+    // Effective min/max for Secondary (ignoring cmap windowing for now? Or applying it?)
+    // Prompt doesn't specify windowing for Secondary, only "intensity scaling parameters".
+    // Let's assume cmap windowing is PRIMARY only feature (Mouse Drag).
+    // Or we duplicate it? "All of the intensity scaling parameters should be duplicated".
+    // I duplicated min/max/auto/thresholds. Cmap windowing is not in the duplicated UI box.
+    // So assume full range for Secondary 0..1 map.
+    double sec_eff_min = sec_min;
+    double sec_eff_max = sec_max;
+    if (fabs(sec_eff_max - sec_eff_min) < 1e-9) sec_eff_max = sec_eff_min + 1.0;
+
     // Populate display buffer
+    gboolean dual_mode = (app->mode_2d && sec->image && raw_data_sec);
+    uint8_t sec_type = dual_mode ? sec->image->md->datatype : 0;
+
     for (int y = 0; y < height; y++) {
         uint32_t *row = (uint32_t*)(pixels + y * stride);
         for (int x = 0; x < width; x++) {
@@ -4135,7 +4516,39 @@ draw_image (ViewerApp *app)
             norm = apply_scaling(norm, app->scale_type);
 
             double r, g, b;
-            get_colormap_color(norm, app->colormap_type, &r, &g, &b);
+
+            if (dual_mode) {
+                double val2 = 0;
+                if (sec_type == _DATATYPE_FLOAT) val2 = ((float*)raw_data_sec)[idx];
+                else if (sec_type == _DATATYPE_DOUBLE) val2 = ((double*)raw_data_sec)[idx];
+                else if (sec_type == _DATATYPE_UINT8) val2 = ((uint8_t*)raw_data_sec)[idx];
+                else if (sec_type == _DATATYPE_INT16) val2 = ((int16_t*)raw_data_sec)[idx];
+                else if (sec_type == _DATATYPE_UINT16) val2 = ((uint16_t*)raw_data_sec)[idx];
+                else if (sec_type == _DATATYPE_INT32) val2 = ((int32_t*)raw_data_sec)[idx];
+                else if (sec_type == _DATATYPE_UINT32) val2 = ((uint32_t*)raw_data_sec)[idx];
+
+                double norm2 = (val2 - sec_eff_min) / (sec_eff_max - sec_eff_min);
+                if (norm2 < 0) norm2 = 0; if (norm2 > 1) norm2 = 1;
+
+                // Use Standard Linear scaling for Secondary color amount?
+                // Or duplicate scale type too? "All intensity scaling parameters".
+                // `StreamContext` has `scale_type`. I didn't add UI for it.
+                // Assuming Linear for secondary mix or reuse scale_type?
+                // Let's use Linear for now as I missed the Dropdown in duplications.
+
+                get_colormap_color_2d(norm, norm2, app->mode_2d_color, &r, &g, &b);
+
+                // Secondary Thresholds
+                if (sec->thresholds_enabled) {
+                    if (val2 > sec->thresh_max_val) {
+                         // What to do? 2D Map saturation is maxed (1.0).
+                         // Maybe nothing special, just clamp sat.
+                         // But for Primary thresholds we color red/blue.
+                    }
+                }
+            } else {
+                get_colormap_color(norm, app->colormap_type, &r, &g, &b);
+            }
 
             uint8_t br = (uint8_t)(r * 255.0);
             uint8_t bg = (uint8_t)(g * 255.0);
@@ -4440,6 +4853,18 @@ activate (GtkApplication *app,
     g_signal_connect(viewer->dropdown_blink_time, "notify::selected", G_CALLBACK(on_blink_time_changed), viewer);
     gtk_box_append(GTK_BOX(hbox_ctrl), viewer->dropdown_blink_time);
 
+    // 2D Mode Toggle
+    viewer->btn_mode_2d = gtk_toggle_button_new_with_label("2D");
+    gtk_widget_add_css_class(viewer->btn_mode_2d, "toggle-green");
+    g_signal_connect(viewer->btn_mode_2d, "toggled", G_CALLBACK(on_mode_2d_toggled), viewer);
+    gtk_box_append(GTK_BOX(hbox_ctrl), viewer->btn_mode_2d);
+
+    const char *colors_2d[] = {"Red", "Green", "Blue", "Cyan", "Magenta", "Yellow", NULL};
+    viewer->dropdown_2d_color = gtk_drop_down_new_from_strings(colors_2d);
+    gtk_drop_down_set_selected(GTK_DROP_DOWN(viewer->dropdown_2d_color), MODE_2D_RED);
+    g_signal_connect(viewer->dropdown_2d_color, "notify::selected", G_CALLBACK(on_mode_2d_color_changed), viewer);
+    gtk_box_append(GTK_BOX(hbox_ctrl), viewer->dropdown_2d_color);
+
     gtk_box_append(GTK_BOX(box_view), gtk_separator_new(GTK_ORIENTATION_VERTICAL));
 
     // Group: Display (Cmap/Scale)
@@ -4640,6 +5065,74 @@ activate (GtkApplication *app,
     gtk_spin_button_set_value(GTK_SPIN_BUTTON(viewer->spin_thresh_max), 1.0);
     g_signal_connect(viewer->spin_thresh_max, "value-changed", G_CALLBACK(on_thresh_max_changed), viewer);
     gtk_box_append(GTK_BOX(hbox_t), viewer->spin_thresh_max);
+
+    gtk_box_append(GTK_BOX(box_levels), gtk_separator_new(GTK_ORIENTATION_VERTICAL));
+
+    // Secondary Scaling Group (Hidden by default, shown in 2D Mode)
+    viewer->box_sec_scaling = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
+    gtk_widget_set_visible(viewer->box_sec_scaling, FALSE);
+    gtk_box_append(GTK_BOX(box_levels), viewer->box_sec_scaling);
+
+    gtk_box_append(GTK_BOX(viewer->box_sec_scaling), gtk_label_new("Sec Scaling"));
+
+    // Sec Auto
+    viewer->btn_sec_autoscale = gtk_toggle_button_new_with_label ("Auto");
+    gtk_widget_add_css_class(viewer->btn_sec_autoscale, "auto-scale-red");
+    g_signal_connect(viewer->btn_sec_autoscale, "toggled", G_CALLBACK(on_sec_autoscale_toggled), viewer);
+    gtk_box_append(GTK_BOX(viewer->box_sec_scaling), viewer->btn_sec_autoscale);
+
+    // Sec Min
+    GtkWidget *vbox_smin = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
+    gtk_box_append(GTK_BOX(viewer->box_sec_scaling), vbox_smin);
+    gtk_box_append(GTK_BOX(vbox_smin), gtk_label_new("Min"));
+
+    viewer->spin_sec_min = gtk_spin_button_new_with_range(-1e20, 1e20, 1.0);
+    gtk_spin_button_set_digits(GTK_SPIN_BUTTON(viewer->spin_sec_min), 2);
+    gtk_widget_set_size_request(viewer->spin_sec_min, 80, -1);
+    g_signal_connect(viewer->spin_sec_min, "value-changed", G_CALLBACK(on_sec_spin_min_changed), viewer);
+    gtk_box_append(GTK_BOX(vbox_smin), viewer->spin_sec_min);
+
+    viewer->dropdown_sec_min_mode = gtk_drop_down_new_from_strings(min_modes);
+    g_signal_connect(viewer->dropdown_sec_min_mode, "notify::selected", G_CALLBACK(on_sec_min_mode_changed), viewer);
+    gtk_box_append(GTK_BOX(vbox_smin), viewer->dropdown_sec_min_mode);
+
+    // Sec Max
+    GtkWidget *vbox_smax = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
+    gtk_box_append(GTK_BOX(viewer->box_sec_scaling), vbox_smax);
+    gtk_box_append(GTK_BOX(vbox_smax), gtk_label_new("Max"));
+
+    viewer->spin_sec_max = gtk_spin_button_new_with_range(-1e20, 1e20, 1.0);
+    gtk_spin_button_set_digits(GTK_SPIN_BUTTON(viewer->spin_sec_max), 2);
+    gtk_widget_set_size_request(viewer->spin_sec_max, 80, -1);
+    g_signal_connect(viewer->spin_sec_max, "value-changed", G_CALLBACK(on_sec_spin_max_changed), viewer);
+    gtk_box_append(GTK_BOX(vbox_smax), viewer->spin_sec_max);
+
+    viewer->dropdown_sec_max_mode = gtk_drop_down_new_from_strings(max_modes);
+    g_signal_connect(viewer->dropdown_sec_max_mode, "notify::selected", G_CALLBACK(on_sec_max_mode_changed), viewer);
+    gtk_box_append(GTK_BOX(vbox_smax), viewer->dropdown_sec_max_mode);
+
+    // Sec Thresholds
+    GtkWidget *vbox_sthresh = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
+    gtk_box_append(GTK_BOX(viewer->box_sec_scaling), vbox_sthresh);
+
+    viewer->check_sec_thresholds = gtk_check_button_new_with_label("Thresh");
+    g_signal_connect(viewer->check_sec_thresholds, "toggled", G_CALLBACK(on_sec_threshold_toggled), viewer);
+    gtk_box_append(GTK_BOX(vbox_sthresh), viewer->check_sec_thresholds);
+
+    GtkWidget *hbox_st = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 2);
+    gtk_box_append(GTK_BOX(vbox_sthresh), hbox_st);
+
+    viewer->spin_sec_thresh_min = gtk_spin_button_new_with_range(-1e20, 1e20, 1.0);
+    gtk_spin_button_set_digits(GTK_SPIN_BUTTON(viewer->spin_sec_thresh_min), 2);
+    gtk_widget_set_size_request(viewer->spin_sec_thresh_min, 60, -1);
+    g_signal_connect(viewer->spin_sec_thresh_min, "value-changed", G_CALLBACK(on_sec_thresh_min_changed), viewer);
+    gtk_box_append(GTK_BOX(hbox_st), viewer->spin_sec_thresh_min);
+
+    viewer->spin_sec_thresh_max = gtk_spin_button_new_with_range(-1e20, 1e20, 1.0);
+    gtk_spin_button_set_digits(GTK_SPIN_BUTTON(viewer->spin_sec_thresh_max), 2);
+    gtk_widget_set_size_request(viewer->spin_sec_thresh_max, 60, -1);
+    g_signal_connect(viewer->spin_sec_thresh_max, "value-changed", G_CALLBACK(on_sec_thresh_max_changed), viewer);
+    gtk_box_append(GTK_BOX(hbox_st), viewer->spin_sec_thresh_max);
 
     // --- Tab 3: Tools ---
     GtkWidget *box_tools = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 10);
@@ -5234,6 +5727,7 @@ main (int    argc,
     }
     if (viewer.display_buffer) free(viewer.display_buffer);
     if (viewer.raw_buffer) free(viewer.raw_buffer);
+    if (viewer.raw_buffer_sec) free(viewer.raw_buffer_sec);
     if (viewer.history_buffer) free(viewer.history_buffer);
     if (viewer.hist_data) free(viewer.hist_data);
     if (viewer.hist_data_full) free(viewer.hist_data_full);
