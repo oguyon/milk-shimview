@@ -5544,6 +5544,7 @@ activate (GtkApplication *app,
     gtk_drawing_area_set_draw_func(GTK_DRAWING_AREA(viewer->hist_area_left), draw_vertical_histogram_func, viewer, NULL);
     gtk_box_append(GTK_BOX(hbox_right), viewer->hist_area_left);
     // Initial visibility - Explicitly bind visibility to toggle state
+    // Use G_BINDING_SYNC_CREATE to ensure the widget state matches the toggle immediately
     g_object_bind_property(viewer->check_show_hist_left, "active", viewer->hist_area_left, "visible", G_BINDING_SYNC_CREATE);
 
     // Colorbar Column
