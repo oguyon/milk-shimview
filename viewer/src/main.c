@@ -4271,15 +4271,6 @@ calculate_autoscale_limits(ViewerApp *app, double *new_min, double *new_max, int
         if (rw <= 0 || rh <= 0) use_roi = FALSE;
     }
 
-    // Pass app->min_val/max_val as history for smoothing
-    *new_min = app->min_val; // Initialize with current for fallback/smoothing base?
-    // Wait, autoscale_process updates *current_min in place.
-    // We should pass new_min (which is likely initialized to app->min_val by caller) as the target to update.
-    // The smoothing uses app_min_val as the 'old' value.
-
-    // Caller `draw_image` passes: `double min_val = app->min_val; calculate(..., &min_val, ...)`
-    // So `*new_min` is `app->min_val` initially.
-
     autoscale_process(new_min, new_max, mode_min, mode_max, app->auto_gain,
                       app->min_val, app->max_val,
                       raw_data, width, height, datatype,
