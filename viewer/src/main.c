@@ -1313,11 +1313,20 @@ on_tbin_clicked (GtkButton *btn, gpointer user_data)
             ctx->image = NULL;
         }
         ctx->image = (IMAGE*)malloc(sizeof(IMAGE));
-        ImageStreamIO_openIm(ctx->image, ctx->image_name);
-
-        // If secondary stream changed and we are in 2D mode, we might need to handle buffer resize or redraw
-        if (target == 1 && app->mode_2d) {
-             // Redraw will pick up new data, but buffer size logic in draw_image handles realloc
+        if (ImageStreamIO_openIm(ctx->image, ctx->image_name) != 0) {
+            free(ctx->image);
+            ctx->image = NULL;
+        } else {
+            // If secondary stream changed and we are in 2D mode, verify dimensions
+            if (target == 1 && (app->mode_2d || app->mode_merge)) {
+                IMAGE *prim = app->image; // In 2D/Merge mode, active is 0, so app->image is Primary
+                if (prim && (prim->md->size[0] != ctx->image->md->size[0] ||
+                             prim->md->size[1] != ctx->image->md->size[1])) {
+                    // Disable 2D/Merge modes if dimensions mismatch
+                    if (app->mode_2d) gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(app->btn_mode_2d), FALSE);
+                    if (app->mode_merge) gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(app->btn_mode_merge), FALSE);
+                }
+            }
         }
     }
 
@@ -1365,7 +1374,20 @@ on_rms_clicked (GtkButton *btn, gpointer user_data)
             ctx->image = NULL;
         }
         ctx->image = (IMAGE*)malloc(sizeof(IMAGE));
-        ImageStreamIO_openIm(ctx->image, ctx->image_name);
+        if (ImageStreamIO_openIm(ctx->image, ctx->image_name) != 0) {
+            free(ctx->image);
+            ctx->image = NULL;
+        } else {
+            // Check dimensions if this is secondary stream and we are in dual mode
+            if (target == 1 && (app->mode_2d || app->mode_merge)) {
+                IMAGE *prim = app->image;
+                if (prim && (prim->md->size[0] != ctx->image->md->size[0] ||
+                             prim->md->size[1] != ctx->image->md->size[1])) {
+                    if (app->mode_2d) gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(app->btn_mode_2d), FALSE);
+                    if (app->mode_merge) gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(app->btn_mode_merge), FALSE);
+                }
+            }
+        }
     }
 
     update_tbin_menu_state(app);
